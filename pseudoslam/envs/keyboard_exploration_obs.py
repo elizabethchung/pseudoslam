@@ -93,7 +93,9 @@ def main():
             scan = sim.get_laser_scan()
             print(scan)
             print(build_label_array(sim))
+            print(sim.angle_range())
             plot_laser_scan_live(scan, fig_laser, ax_laser)
+            sim.draw_laser_scan_on_map()
         elif w=='q':
             print("Terminate the simulation and quit.")
             break
@@ -118,11 +120,11 @@ def build_label_array(sim):
     label_array = np.zeros(360, dtype=np.int32)
     # Set the corresponding indices to 1
     scan = sim.get_laser_scan()
-    max_scan = np.max(scan)
+    max_range = sim.laser_range if hasattr(sim, "laser_range") else np.max(scan)
     for angle in angles:
         dist_to_obs = sim.distance_to_obstacle(angle)
-        # Only set label if the scan actually detects something (not max range)
-        if scan[angle] < max_scan and dist_to_obs <= scan[angle]:
+        # Set label if the scan detects an obstacle (distance less than max range and less than or equal to distance to obstacle)
+        if scan[angle] < max_range and scan[angle] <= dist_to_obs:
             label_array[angle] = 1
     return label_array
 
