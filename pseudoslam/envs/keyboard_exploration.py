@@ -73,8 +73,8 @@ def main():
         plt.clf()
         plt.imshow(slamMap,cmap="gray")
         # Save only if counter is multiple of 100
-        if counter % 1 == 0:
-            plt.savefig(f"test_{counter}.png")
+        # if counter % 1 == 0:
+            # plt.savefig(f"test_{counter}.png")
         plt.draw()
         plt.pause(0.001)
         # fig_map.savefig("test.png")	# uncomment this if you want save figure

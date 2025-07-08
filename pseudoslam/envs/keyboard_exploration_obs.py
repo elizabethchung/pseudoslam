@@ -1,8 +1,11 @@
+import os
+from pathlib import Path
 import numpy as np
 from matplotlib import pyplot as plt
 from os import path
 from pseudoslam.envs.simulator.pseudoSlam import pseudoSlam
 import sys, select, termios, tty
+import random
 
 moveBindings = {'w':(1,0),
                 'a':(0,1),
@@ -23,7 +26,7 @@ def getMotion():
         robot_x = moveBindings[key][0]
         th = moveBindings[key][1]
         return robot_x,th
-    if (key in ['q', 'r', 'e']):
+    if (key in ['q', 'r', 'e','l']):
         return key, key
     else:
         return 0,0
@@ -73,8 +76,8 @@ def main():
         plt.figure(fig_map.number)
         plt.clf()
         plt.imshow(slamMap,cmap="gray")
-        if counter % 1 == 0:
-            plt.savefig(f"test_{counter}.png")
+        # if counter % 1 == 0:
+            # plt.savefig(f"test_{counter}.png")
         plt.draw()
         plt.pause(0.001)
 
@@ -91,17 +94,108 @@ def main():
         elif w=='e':
             print("Laser scan data:")
             scan = sim.get_laser_scan()
+            save_data(scan, 'training_lidar')
             print(scan)
-            print(build_label_array(sim))
+            labels = build_label_array(sim)
+            print(labels)
+            save_data(labels, 'training_labels')
             print(sim.angle_range())
             plot_laser_scan_live(scan, fig_laser, ax_laser)
             sim.draw_laser_scan_on_map()
         elif w=='q':
             print("Terminate the simulation and quit.")
             break
+        elif w=='l':
+            loop_pose(sim)
         else:
             continue
     return
+
+def save_data(data, filename):
+    """ Append data to a file in the 'data' directory. """
+    data_dir = Path(__file__).parent / 'data'
+    data_dir.mkdir(parents=True, exist_ok=True)  # Create directory if it doesn't exist
+    file_path = data_dir / f"{filename}.npy"
+    
+    # Check if file exists and load existing data
+    if file_path.exists():
+        try:
+            existing_data = np.load(file_path)
+            
+            # Check if existing data is empty or has wrong shape
+            if existing_data.size == 0 or len(existing_data.shape) != 2:
+                # Start fresh if file is empty or malformed
+                updated_data = data.reshape(1, -1)
+            else:
+                # Append new data as a new row
+                updated_data = np.concatenate([existing_data, data.reshape(1, -1)], axis=0)
+        except Exception as e:
+            print(f"Error loading existing file: {e}. Creating new file.")
+            updated_data = data.reshape(1, -1)
+    else:
+        # File doesn't exist, create it with just this data
+        updated_data = data.reshape(1, -1)
+    
+    # Save the updated data
+    np.save(file_path, updated_data)
+    print(f"Data saved to {file_path}, shape: {updated_data.shape}")
+
+def loop_pose(sim):
+    """
+    Simulate a user moving around: at each step, pick a random valid action (forward, left, right),
+    execute it, and save LIDAR scan and labels. Repeat for 5000 steps.
+    """
+
+    actions = ["forward", "left", "right"]
+    for i in range(500):
+        print(f"Step {i+1}/500: Executing random action...")
+        # Randomly choose an action multiple times
+        for i in range(5):
+            action = random.choice(actions)
+            if action == "forward":
+                sim.moveRobot("forward")
+            elif action == "left":
+                sim.moveRobot("left")
+            elif action == "right":
+                sim.moveRobot("right")
+            else:
+                print(f"Unknown action: {action}")
+                continue
+        scan = sim.get_laser_scan()
+        save_data(scan, 'testing_lidar')
+        labels = build_label_array(sim)
+        save_data(labels, 'testing_labels')
+        if i % 1 == 0:
+            print(f"Step {i}: Action {action}, Pose {sim.get_pose()}")
+            print(f"Scan: {scan}")
+            print(f"Labels: {labels}")
+            # Plot the laser scan live
+            """fig_laser, ax_laser = plt.subplots(figsize=(8, 6))
+            plot_laser_scan_live(scan, fig_laser, ax_laser)
+            # Plot the map with the robot's position
+            plt.figure()
+            plt.imshow(sim.get_state(), cmap="gray")
+            # Add the robot's scan to the map
+            sim.draw_laser_scan_on_map()
+            plt.title(f"Robot Pose: {sim.get_pose()}")
+            plt.pause(15)"""
+        # Respawn if the robot has x or y coordinate near map boundary
+        pose = sim.get_pose()
+        # pose is an array: [y, x, angle]
+        if isinstance(pose, (tuple, list, np.ndarray)) and len(pose) >= 2:
+            y, x = pose[0], pose[1]
+        else:
+            raise ValueError(f"sim.get_pose() did not return at least two values: got {pose}")
+        # get_map_boundaries returns [y_min, y_max, x_min, x_max]
+        boundaries = sim.get_map_boundaries()
+        if len(boundaries) != 4:
+            raise ValueError(f"sim.get_map_boundaries() did not return 4 values: got {boundaries}")
+        y_min, y_max, x_min, x_max = boundaries
+        if y < y_min + 10 or y > y_max - 10 or x < x_min + 10 or x > x_max - 10:
+            print(f"Robot is near the map boundary at ({y}, {x}). Respawning...")
+            # Randomize the robot's position
+            sim._randomizeRobotPose()
+    print("Loop completed.")
 
 def build_label_array(sim):
     # Use angle_range to get the angles for the laser scan
@@ -124,7 +218,7 @@ def build_label_array(sim):
     for angle in angles:
         dist_to_obs = sim.distance_to_obstacle(angle)
         # Set label if the scan detects an obstacle (distance less than max range and less than or equal to distance to obstacle)
-        if scan[angle] < max_range and scan[angle] <= dist_to_obs:
+        if scan[angle] <= dist_to_obs:
             label_array[angle] = 1
     return label_array
 
