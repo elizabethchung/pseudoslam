@@ -6,6 +6,46 @@ from os import path
 from pseudoslam.envs.simulator.pseudoSlam import pseudoSlam
 import sys, select, termios, tty
 import random
+import torch
+# Try importing ResNet from the correct location; adjust as needed if the file is elsewhere
+"""try:
+    from pseudoslam.envs.resnet import ResNet
+except ModuleNotFoundError:
+    # Fallback: try importing from local directory if running as a script
+    from resnet import ResNet
+
+try:
+    from pseudoslam.envs.resnet_tsdf import ResNetWithTSDF
+except ModuleNotFoundError:
+    # Fallback: try importing from local directory if running as a script
+    from resnet_tsdf import ResNetWithTSDF """
+
+try:
+    from resnet_tsdf_save import ImprovedResNetWithTSDF
+except ModuleNotFoundError:
+    # Fallback: try importing from local directory if running as a script
+    from resnet_tsdf_save import ImprovedResNetWithTSDF
+
+from resnet_tsdf import lidar_to_tsdf_obstacles
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+"""base_dir = os.path.dirname(os.path.abspath(__file__))
+data_dir = os.path.join(base_dir, "data")
+model_path = os.path.join(data_dir, "resnet_lidar_model.pth")
+
+resnet = ResNet()
+resnet.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
+resnet.eval()"""
+
+base_dir = os.path.dirname(os.path.abspath(__file__))
+data_dir = os.path.join(base_dir, "data")
+model_path = os.path.join(data_dir, "improved_resnet_lidar_model_tsdf_min_max.pth")
+
+resnet = ImprovedResNetWithTSDF()
+resnet.to(device)
+resnet.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')), strict=False)
+resnet.eval()
 
 moveBindings = {'w':(1,0),
                 'a':(0,1),
@@ -94,14 +134,19 @@ def main():
         elif w=='e':
             print("Laser scan data:")
             scan = sim.get_laser_scan()
-            save_data(scan, 'training_lidar')
             print(scan)
             labels = build_label_array(sim)
-            print(labels)
-            save_data(labels, 'training_labels')
-            print(sim.angle_range())
+            print("Automated labeling:",labels)
+            print('Angle range:', sim.angle_range())
             plot_laser_scan_live(scan, fig_laser, ax_laser)
-            sim.draw_laser_scan_on_map()
+            # sim.draw_laser_scan_on_map()
+            ml_min, ml_max = ml_obstacle_detection(scan)
+            labels = build_label_array_ml(sim, ml_min, ml_max)
+            # Plot ML prediction on the SLAM map
+            sim.draw_laser_scan_on_map_ml(ml_min, ml_max)
+            print("ML Predictions:", f' ML min:{ml_min}, ml_max:{ml_max}')
+            print("Labels from ML:", labels)
+            # sim.plot_ml_preds(ml_preds)
         elif w=='q':
             print("Terminate the simulation and quit.")
             break
@@ -147,8 +192,8 @@ def loop_pose(sim):
     """
 
     actions = ["forward", "left", "right"]
-    for i in range(500):
-        print(f"Step {i+1}/500: Executing random action...")
+    for i in range(2000):
+        print(f"Step {i+1}/1000: Executing random action...")
         # Randomly choose an action multiple times
         for i in range(5):
             action = random.choice(actions)
@@ -162,9 +207,9 @@ def loop_pose(sim):
                 print(f"Unknown action: {action}")
                 continue
         scan = sim.get_laser_scan()
-        save_data(scan, 'testing_lidar')
+        save_data(scan, 'training_lidar')
         labels = build_label_array(sim)
-        save_data(labels, 'testing_labels')
+        save_data(labels, 'training_labels')
         if i % 1 == 0:
             print(f"Step {i}: Action {action}, Pose {sim.get_pose()}")
             print(f"Scan: {scan}")
@@ -191,15 +236,89 @@ def loop_pose(sim):
         if len(boundaries) != 4:
             raise ValueError(f"sim.get_map_boundaries() did not return 4 values: got {boundaries}")
         y_min, y_max, x_min, x_max = boundaries
-        if y < y_min + 10 or y > y_max - 10 or x < x_min + 10 or x > x_max - 10:
+        """if y < y_min + 10 or y > y_max - 10 or x < x_min + 10 or x > x_max - 10:
             print(f"Robot is near the map boundary at ({y}, {x}). Respawning...")
             # Randomize the robot's position
-            sim._randomizeRobotPose()
+            sim._randomizeRobotPose()"""
     print("Loop completed.")
+
+def ml_obstacle_detection0(scan):
+    scan_np = np.array(scan).reshape(1, 360)
+    dummy_labels = np.ones_like(scan_np)  # assume all 1's for obstacle labels to generate TSDF
+
+    tsdf_np = lidar_to_tsdf_obstacles(scan_np, dummy_labels)  # shape (1, 128, 128)
+
+    scan_tensor = torch.tensor(scan_np, dtype=torch.float32).unsqueeze(1).to(device)      # (1, 1, 360)
+    tsdf_tensor = torch.tensor(tsdf_np, dtype=torch.float32).unsqueeze(1).to(device)      # (1, 1, 128, 128)
+
+    with torch.no_grad():
+        min_logits, max_logits = resnet(scan_tensor, tsdf_tensor)  # (1, 360), (1, 360)
+
+        # Turn min and max logits into label array
+        min_idx = torch.argmax(min_logits, dim=1).item()
+        max_idx = torch.argmax(max_logits, dim=1).item()
+        labels = np.zeros(360, dtype=np.int32)
+
+        if min_idx <= max_idx:
+            labels[min_idx:max_idx+1] = 1
+        else:
+            labels[min_idx:] = 1
+            labels[:max_idx+1] = 1
+
+    return labels
+
+def ml_obstacle_detection(scan):
+    scan_np = np.array(scan).reshape(1, 360)
+    dummy_labels = np.ones_like(scan_np)  # assume all 1's for obstacle labels to generate TSDF
+
+    tsdf_np = lidar_to_tsdf_obstacles(scan_np, dummy_labels)  # shape (1, 128, 128)
+
+    scan_tensor = torch.tensor(scan_np, dtype=torch.float32).unsqueeze(1).to(device)      # (1, 1, 360)
+    tsdf_tensor = torch.tensor(tsdf_np, dtype=torch.float32).unsqueeze(1).to(device)      # (1, 1, 128, 128)
+
+    with torch.no_grad():
+        min_logits, max_logits = resnet(scan_tensor, tsdf_tensor)  # (1, 360), (1, 360)
+
+        # Turn min and max logits into label array
+        min_idx = torch.argmax(min_logits, dim=1).item()
+        max_idx = torch.argmax(max_logits, dim=1).item()
+        labels = np.zeros(360, dtype=np.int32)
+
+        if min_idx <= max_idx:
+            labels[min_idx:max_idx+1] = 1
+        else:
+            labels[min_idx:] = 1
+            labels[:max_idx+1] = 1
+
+    return min_idx, max_idx  # Return the indices of the min and max predictions
+
 
 def build_label_array(sim):
     # Use angle_range to get the angles for the laser scan
     angle_min, angle_max = sim.angle_range()
+    # Ensure angle_min and angle_max are Python scalars
+    angle_min = int(angle_min.item() if hasattr(angle_min, "item") else angle_min)
+    angle_max = int(angle_max.item() if hasattr(angle_max, "item") else angle_max)
+    # Might go from 340 to 20 degrees, so we need to handle the wrap-around
+    if angle_max < angle_min:
+        angles = np.arange(angle_min, 360).tolist() + np.arange(0, angle_max + 1).tolist()
+    else:
+        angles = np.arange(angle_min, angle_max + 1).tolist()
+    # Subtract 1 for index and wrap around using modulo 360
+    angles = [(angle - 1) % 360 for angle in angles]  # Convert to zero-based index safely
+    # Create an array of 360 zeros to start with
+    label_array = np.zeros(360, dtype=np.int32)
+    # Set the corresponding indices to 1
+    scan = sim.get_laser_scan()
+    max_range = sim.laser_range if hasattr(sim, "laser_range") else np.max(scan)
+    for angle in angles:
+        dist_to_obs = sim.distance_to_obstacle(angle)
+        # Set label if the scan detects an obstacle (distance less than max range and less than or equal to distance to obstacle)
+        if scan[angle] <= dist_to_obs:
+            label_array[angle] = 1
+    return label_array
+
+def build_label_array_ml(sim, angle_min, angle_max):
     # Ensure angle_min and angle_max are Python scalars
     angle_min = int(angle_min.item() if hasattr(angle_min, "item") else angle_min)
     angle_max = int(angle_max.item() if hasattr(angle_max, "item") else angle_max)
