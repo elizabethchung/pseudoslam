@@ -5,7 +5,8 @@ meter2pixel: 25 # X pixel =1 meter
 mode: 0  # 0 for exploration mode, 1 for navigation mode
 
 obstacle:
-  number: 1 # number of obstacle added to the world
+  number: 3 # number of obstacle added to the world
+  shape: 2 # obstacle shape can only be 2
   size: # size of obstacle added in meter, radius/half length
     min: 0.5 
     max: 2

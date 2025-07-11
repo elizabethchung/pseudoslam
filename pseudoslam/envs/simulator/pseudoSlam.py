@@ -35,10 +35,10 @@ class pseudoSlam():
         self.slamErr_angular= 0
         self.state_size= np.array([0,0])
         self.world= np.zeros([1,1])
-        self.obstacle_config = obstacle_config
+        self.obstacle_config = obstacle_config  # now actually use the __init__ argument
         self.traj = []
         self.obs_center = np.array([])
-        self.obs_len = 0
+        self.obs_len = np.array([])
 
         with open(param_file) as stream:
             self.config = yaml.safe_load(stream)
@@ -62,6 +62,9 @@ class pseudoSlam():
 
         angles_vect = np.arange(-self.laser_fov*0.5, self.laser_fov*0.5,step=self.laser_resol)
         self.angles_vect = angles_vect.reshape(angles_vect.shape[0], 1) # generate angles vector from -laser_angle/2 to laser_angle
+
+        self.world = np.full_like(self.world, self.map_color['free'])
+        # self.add_obstacle()
 
         self.robotPose = self.robotPose_init
         self.reset()
@@ -126,7 +129,7 @@ class pseudoSlam():
         self.robotPose_init[2]= self.config_poseInit[2]
         self.add_obstacle()
         self.map_id = map_id.copy()
-
+        print("Obstacle config is:", self.obstacle_config)
         return self.world
 
     def _map_process(self,input_world, padding=5):
@@ -150,6 +153,7 @@ class pseudoSlam():
         return map_gt
 
     def add_obstacle(self):
+        print(f"Obstacle config is: {self.obstacle_config}")
         """ Randomly add obstacle to world """
         if self.obstacle_config:
             """ add user defined obstacles """
@@ -168,6 +172,7 @@ class pseudoSlam():
             return
 
         prox_min = 3 # min distance in pixel between added obstacle & obstacle in map
+        self.world = np.zeros_like(self.world)
         world_obs = np.copy(self.world) # create a new image for adding obstacle
         (h,w)= self.world.shape
 
@@ -179,18 +184,19 @@ class pseudoSlam():
                 obs_theta = np.random.random()*360
 
                 # check if obstacle length exceed 45% of world shape, if yes, randomly change obs_sizeRange to 5%~30% of min(h,w)
-                self.obs_len= np.sqrt(obs_a*obs_a + obs_b*obs_b)*2
+                obs_len= np.sqrt(obs_a*obs_a + obs_b*obs_b)*2
                 if (self.obs_len*2>h*0.9 or self.obs_len*2>w*0.9):
                     self.obs_sizeRange[0]= np.random.randint(500,1500)*1.0/10000 *np.min((h,w))
                     self.obs_sizeRange[1]= np.random.randint(500,3000)*1.0/10000 *np.min((h,w))
                     self.obs_sizeRange= np.sort(self.obs_sizeRange,axis=0).astype(int)
                     print('obs_sizeRange exceed world shape, now changing to ',self.obs_sizeRange.tolist())
                     continue
+                # Appnd obs_len to self.obs_len for later use
+                self.obs_len = np.append(self.obs_len, obs_len)
 
                 # randomly select shape type of obstacle [0: rectangle; 1: ellipse; 2: circle]
-                obs_type = np.random.randint(0, 3)
-                if obs_type == 2:
-                    obs_b = obs_a
+                obs_type = 2  # For testing, always use circle
+                obs_b = obs_a
 
                 # randomly generate obstacle center coordinate that the obstacle would not exceed world boundary
                 bound = np.round(self.obs_len).astype(int) + prox_min
@@ -227,7 +233,10 @@ class pseudoSlam():
                 if self.obs_center.size == 0:
                     self.obs_center = obs_center.reshape(1, 2)
                 else:
+                    # Append the new obstacle center to the existing array
+                    obs_center = obs_center.reshape(1, 2)
                     self.obs_center = np.vstack([self.obs_center, obs_center])
+                    # self.obs_center = np.vstack([self.obs_center, obs_center])
 
                 break
 
@@ -400,65 +409,74 @@ class pseudoSlam():
         self._build_map_with_rangeCoordMat(y_rangeCoordMat,x_rangeCoordMat)
         return self.slamMap
     
-
     def center_angle(self):
-        """Calculate the angle between robot's orientation and obstacle direction."""
-
+        """
+        Calculate the angle(s) between the robot's orientation and the direction to each obstacle center.
+        Returns:
+            angles: np.ndarray of shape (N,) where N is the number of obstacles.
+                    Each value is the angle (in radians, [0, 2π)) from robot's heading to the obstacle.
+        """
         if self.obs_center.size == 0:
-            return 0.0
+            return np.array([])
 
-        # In case obs_center has different dimensions
-        if self.obs_center.ndim == 1:
-            obs_y, obs_x = self.obs_center[0], self.obs_center[1]
-        else:
-            obs_y, obs_x = self.obs_center[0, 0], self.obs_center[0, 1]
+        # Ensure obs_center is 2D: (N, 2)
+        obs_centers = self.obs_center
+        if obs_centers.ndim == 1:
+            obs_centers = obs_centers.reshape(1, 2)
 
-        # Get robot position
         robot_y, robot_x, robot_theta = self.robotPose[0], self.robotPose[1], self.robotPose[2]
+        angles = []
 
-        # In the image y increases downwards, so inverting the y-axis for calculations
-        dy = -(obs_y - robot_y)
-        dx = obs_x - robot_x
+        for obs in obs_centers:
+            obs_y, obs_x = obs[0], obs[1]
+            dy = -(obs_y - robot_y)  # negative for image y-axis
+            dx = obs_x - robot_x
+            angle_to_obstacle = np.arctan2(dy, dx)
+            angle_diff = angle_to_obstacle - robot_theta
+            angle_diff = np.arctan2(np.sin(angle_diff), np.cos(angle_diff))  # normalize to [-π, π]
+            if angle_diff < 0:
+                angle_diff += 2 * np.pi  # convert to [0, 2π)
+            angles.append(angle_diff)
 
-        # Calculate angle from robot to obstacle (world frame)
-        angle_to_obstacle = np.arctan2(dy, dx)
-
-        # Calculate the difference between where robot is facing and where obstacle is
-        angle_diff = angle_to_obstacle - robot_theta
-
-        # Normalize to [-π, π] range 
-        angle_diff = np.arctan2(np.sin(angle_diff), np.cos(angle_diff))
-
-        # Convert to [0, 2π) for positive angles
-        if angle_diff < 0:
-            angle_diff += 2 * np.pi
-
-        print(f"Robot at: ({robot_y:.2f}, {robot_x:.2f}) facing {np.degrees(robot_theta):.1f}°")
-        print(f"Obstacle at: ({obs_y:.2f}, {obs_x:.2f})")
-        print(f"Angle to obstacle: {np.degrees(angle_to_obstacle):.1f}°")
-        print(f"Angular difference: {np.degrees(angle_diff):.1f}° ({angle_diff:.3f} rad)")
-
-        return angle_diff
+        return np.array(angles)
     
     def angle_range(self):
-        # ▸ use half‑width/height instead of half‑diagonal
-        #   – if obs_len is the diagonal, divide by √2;
-        #   – or, if you can, measure width/height directly.
-        obs_radius = self.obs_len / (2.0 * np.sqrt(2))   # <-- key change
+        """
+        For each obstacle, compute the angular span (range) it subtends at the robot's position.
+        Returns:
+            angle_ranges: np.ndarray of shape (N, 2), where each row is [start_angle_deg, end_angle_deg] for an obstacle,
+                          angles are in degrees in [0, 360).
+        """
+        center_angles = self.center_angle()  # shape (N,)
+        if self.obs_len.size == 0 or center_angles.size == 0:
+            return np.empty((0, 2), dtype=int)
 
-        distance = np.hypot(self.obs_center[0, 0] - self.robotPose[0],
-                            self.obs_center[0, 1] - self.robotPose[1])
-        if distance == 0:
-            return 0.0
+        # Ensure obs_len is 1D and matches number of obstacles
+        obs_lens = self.obs_len
+        if obs_lens.ndim == 0:
+            obs_lens = np.array([obs_lens])
+        if obs_lens.shape[0] != center_angles.shape[0]:
+            obs_lens = np.full(center_angles.shape[0], obs_lens[0])
 
-        half_span = np.arctan2(obs_radius, distance)     # radians
-        center     = self.center_angle()                 # radians
+        angle_ranges = []
+        for i, center_angle in enumerate(center_angles):
+            obs_radius = obs_lens[i] / (2.0 * np.sqrt(2))  # half-width/height if obs_len is diagonal
 
-        angles = np.array([center - half_span, center + half_span])
-        angles = np.mod(angles, 2 * np.pi)               # wrap to [0, 2π)
-        angles = np.round(np.rad2deg(angles)).astype(int)
+            # Distance from robot to this obstacle center
+            obs_y, obs_x = self.obs_center[i]
+            distance = np.hypot(obs_y - self.robotPose[0], obs_x - self.robotPose[1])
+            if distance == 0:
+                angle_ranges.append([0, 0])
+                continue
 
-        return angles
+            half_span = np.arctan2(obs_radius, distance)  # radians
+
+            angles = np.array([center_angle - half_span, center_angle + half_span])
+            angles = np.mod(angles, 2 * np.pi)  # wrap to [0, 2π)
+            angles_deg = np.round(np.rad2deg(angles)).astype(int)
+            angle_ranges.append(angles_deg)
+
+        return np.array(angle_ranges)
 
     def distance_to_obstacle(self, angle_deg=None):
         """
