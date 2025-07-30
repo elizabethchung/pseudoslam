@@ -206,8 +206,8 @@ def generate_multi_obstacle_targets(labels):
                 obstacle_regions.append(merged_region)
 
         # Print and save
-        if sample_idx == 0:
-            print(f"Sample {sample_idx}: {len(obstacle_regions)} obstacles: {obstacle_regions}")
+        # if sample_idx == 0:
+        #     print(f"Sample {sample_idx}: {len(obstacle_regions)} obstacles: {obstacle_regions}")
         batch_targets.append(obstacle_regions)
 
     return batch_targets
