@@ -19,7 +19,7 @@ else:
     device = torch.device("cpu")
 print(f"Using device: {device}")
 
-num_epochs = 10
+num_epochs = 100
 batch_size = 64
 learning_rate = 0.0001
 torch.backends.cudnn.benchmark = True
