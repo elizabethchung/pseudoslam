@@ -48,9 +48,9 @@ def visualize_input_sample(lidar_data, tsdf_data, label, pred, mask=None):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
-num_epochs = 20
-batch_size = 32
-learning_rate = 0.0001
+num_epochs = 50
+batch_size = 64
+learning_rate = 0.00005
 torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner for faster training
 
 torch.autograd.set_detect_anomaly(True)
@@ -241,7 +241,7 @@ def improved_multi_obstacle_loss_with_constraints(predictions, obstacle_targets,
                                                 alpha=0.5,
                                                 confidence_weight=1.0,
                                                 span_constraint_weight=0.3,
-                                                diversity_weight=1.5):
+                                                diversity_weight=1.0):
     """
     Enhanced loss function with span constraints and diversity enforcement
     """
@@ -317,18 +317,16 @@ def improved_multi_obstacle_loss_with_constraints(predictions, obstacle_targets,
                 else:
                     pred_span_width = (360 - pred_min_idx) + (pred_max_idx + 1)
                 
-                # Penalize spans that are too wide (>100 degrees) or too narrow (<3 degrees)
+                # Penalize spans that are too wide (>200 degrees)
                 span_width_penalty = 0.0
-                if pred_span_width > 100:
-                    span_width_penalty += (pred_span_width - 100) ** 2 * 0.01
-                elif pred_span_width < 3:
-                    span_width_penalty += (3 - pred_span_width) ** 2 * 0.1
-                
+                if pred_span_width > 200:
+                    span_width_penalty += (pred_span_width - 200) ** 2 * 0.01
+
                 # Penalize spans that are very different from ground truth width
                 width_diff = abs(pred_span_width - gt_span_width)
-                if width_diff > 20:  # Allow some tolerance
-                    span_width_penalty += (width_diff - 20) ** 2 * 0.005
-                
+                if width_diff > 10:  # Allow some tolerance
+                    span_width_penalty += (width_diff - 10) ** 2 * 0.05
+
                 total_span_constraint_loss += span_width_penalty
                 
                 valid_samples += 1
@@ -484,7 +482,7 @@ class ResidualBlock(nn.Module):
         out = out + residual
         return self.relu(out)
 
-class ImprovedResNetNoGating(nn.Module):
+class ImprovedResNetNoGating3(nn.Module):
     def __init__(self):
         super().__init__()
         self.max_obstacles = 3
@@ -760,11 +758,11 @@ test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, pin
 
 
 # Use improved model without gating
-resnet = ImprovedResNetNoGating().to(device)
+resnet = ImprovedResNetNoGating3().to(device)
 
 
 def train_model():
-    optimizer = optim.AdamW(resnet.parameters(), lr=0.0001, weight_decay=1e-4)  
+    optimizer = optim.AdamW(resnet.parameters(), lr=0.0001, weight_decay=1e-3)  
     
     # CRITICAL: More gradual learning rate decay
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -790,7 +788,7 @@ def train_model():
     for epoch in range(num_epochs):
         resnet.train()
         epoch_loss = 0.0
-        epoch_components = {'position_loss': 0.0, 'confidence_loss': 0.0}
+        epoch_components = {'position_loss': 0.0, 'confidence_loss': 0.0, 'span_constraint_loss': 0.0, 'diversity_loss': 0.0}
         batch_count = 0
         
         for batch_idx, (distances, labels, _, tsdf) in enumerate(train_loader):
@@ -908,7 +906,7 @@ def improved_post_processing(predictions, num_expected_obstacles=3):
                 span_width = (360 - best_min_idx) + (best_max_idx + 1)
 
             # Skip unreasonable spans
-            if span_width < 3 or span_width > 100:
+            if span_width < 1 or span_width > 200:
                 continue
 
             # Use combined certainty as confidence surrogate (sum of max logits at predicted points)
@@ -1090,7 +1088,7 @@ def test_model_with_improved_processing(loss_history, loss_components):
     return obstacle_accuracy, avg_error
 
 
-def test_model_with_improved_processing_single(dataloader, num_expected_obstacles=2, verbose=False):
+def test_model_with_improved_processing_single(dataloader, num_expected_obstacles=3, verbose=False):
     """
     Runs the model on the provided dataloader and returns predicted obstacle spans.
 
@@ -1102,7 +1100,7 @@ def test_model_with_improved_processing_single(dataloader, num_expected_obstacle
     Returns:
         all_predictions (List[List[Tuple[int, int]]]): List of predicted spans for each sample
     """
-    test_resnet = ImprovedResNetNoGating().to(device)
+    test_resnet = ImprovedResNetNoGating3().to(device)
     model_path = os.path.join(data_dir, "resnet_3.pth")
     test_resnet.load_state_dict(torch.load(model_path))
     test_resnet.eval()
@@ -1145,28 +1143,28 @@ inspect_dataset_constructor()
 
 if __name__ == "__main__":
     # train_model_few_batches()
-    # loss_history, loss_components = train_model()
-    # obstacle_accuracy, avg_error = test_model_with_improved_processing(loss_history, loss_components)
-    sample_lidar = testing_lidar[200]  # Use the first sample for testing
-    sample_tsdf = lidar_to_tsdf_obstacles(np.expand_dims(sample_lidar, axis=0))  # Get corresponding TSDF
+    loss_history, loss_components = train_model()
+    obstacle_accuracy, avg_error = test_model_with_improved_processing(loss_history, loss_components)
+    # sample_lidar = testing_lidar[200]  # Use the first sample for testing
+    # sample_tsdf = lidar_to_tsdf_obstacles(np.expand_dims(sample_lidar, axis=0))  # Get corresponding TSDF
     # Generate dummy labels (all 0s)
-    dummy_labels = np.zeros((1, 360), dtype=np.float32)  # shape: (1, 360)
-    # dummy_labels = np.expand_dims(labels_test[200], axis=0)  # shape: (1, 360)
-    actual_obstacle_spans = generate_multi_obstacle_targets(np.expand_dims(labels_test[200], axis=0))  # Get ground truth
-    single_test = LidarTSDFDataset(
-        np.expand_dims(sample_lidar, axis=0), 
-        dummy_labels,  # Dummy labels
-        np.expand_dims(testing_mask[200], axis=0),
-        tsdf_cache_path=None)
+    # dummy_labels = np.zeros((1, 360), dtype=np.float32)  # shape: (1, 360)
+    # # dummy_labels = np.expand_dims(labels_test[200], axis=0)  # shape: (1, 360)
+    # actual_obstacle_spans = generate_multi_obstacle_targets(np.expand_dims(labels_test[200], axis=0))  # Get ground truth
+    # single_test = LidarTSDFDataset(
+    #     np.expand_dims(sample_lidar, axis=0), 
+    #     dummy_labels,  # Dummy labels
+    #     np.expand_dims(testing_mask[200], axis=0),
+    #     tsdf_cache_path=None)
 
-    single_test = DataLoader(single_test, batch_size=1, shuffle=False, pin_memory=True, num_workers=4)
+    # single_test = DataLoader(single_test, batch_size=1, shuffle=False, pin_memory=True, num_workers=4)
 
-    predicted_spans = test_model_with_improved_processing_single(single_test)
+    # predicted_spans = test_model_with_improved_processing_single(single_test)
 
-    print("Predicted obstacle spans:")
-    print(predicted_spans)
-    print("Actual obstacle spans:")
-    print(actual_obstacle_spans)
+    # print("Predicted obstacle spans:")
+    # print(predicted_spans)
+    # print("Actual obstacle spans:")
+    # print(actual_obstacle_spans)
 
     model_path = os.path.join(data_dir, "resnet_3.pth")
     torch.save(resnet.state_dict(), model_path)

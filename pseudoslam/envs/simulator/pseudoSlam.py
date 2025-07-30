@@ -1,12 +1,10 @@
 import numpy as np
-from matplotlib import pyplot as plt
-import cv2, os
+import cv2
+import os
 
 import yaml
 import pseudoslam.envs.simulator.util as util
 import pseudoslam.envs.simulator.jsonReader as jsonReader
-
-import time
 
 
 map_color= {'uncertain':-101, 'free':0, 'obstacle':100}
@@ -14,6 +12,8 @@ move_choice= {'forward':np.array([1,0]), 'left': np.array([0,1]), 'right': np.ar
 
 
 class pseudoSlam():
+    def __init__(self, param_file, obstacle_config=None):
+        """ pseudoSlam initilization """
     def __init__(self, param_file, obstacle_config=None):
         """ pseudoSlam initilization """
         np.random.seed(0)
@@ -35,13 +35,12 @@ class pseudoSlam():
         self.slamErr_angular= 0
         self.state_size= np.array([0,0])
         self.world= np.zeros([1,1])
-        self.obstacle_config = obstacle_config  # now actually use the __init__ argument
+        self.obstacle_config = obstacle_config  # use the __init__ argument
         self.traj = []
         self.obs_center = np.array([])
         self.obs_len = np.array([])
-
-        with open(param_file) as stream:
-            self.config = yaml.safe_load(stream)
+        with open(param_file, 'r') as f:
+            self.config = yaml.safe_load(f)
 
         """json reader init"""
         self.json_reader = jsonReader.jsonReader(self.config['json_dir'], self.config['meter2pixel'])
@@ -152,7 +151,109 @@ class pseudoSlam():
         map_gt = np.pad(map_gt, padding, mode='constant', constant_values=self.map_color['obstacle'])
         return map_gt
 
+    # def add_obstacle(self):
+    #     print(f"Obstacle config is: {self.obstacle_config}")
+    #     """ Randomly add obstacle to world """
+    #     if self.obstacle_config:
+    #         """ add user defined obstacles """
+    #         f = open(self.obstacle_config, "r")
+    #         for config in f:
+    #             x, y, w, h = [int(n) for n in config.split(" ")]
+    #             rect = np.array([[x - w // 2, y - h // 2],
+    #                              [x - w // 2, y + h // 2],
+    #                              [x + w // 2, y + h // 2],
+    #                              [x + w // 2, y - h // 2]],
+    #                             np.int32)
+    #             cv2.fillPoly(self.world, [rect], self.map_color["obstacle"])
+    #         return self.world
+
+    #     if self.obs_num == 0:  # No obstacle added.
+    #         return
+
+    #     prox_min = 3 # min distance in pixel between added obstacle & obstacle in map
+    #     self.world = np.zeros_like(self.world)
+    #     world_obs = np.copy(self.world) # create a new image for adding obstacle
+    #     (h,w)= self.world.shape
+
+    #     for _ in range(self.obs_num):
+    #         while True:
+    #             # randomly generate obstacle orientation & obstacle size that fall within obstacle_sizeRange
+    #             obs_a = np.random.randint(self.obs_sizeRange[0], self.obs_sizeRange[1])*0.5
+    #             obs_b = np.random.randint(self.obs_sizeRange[0], self.obs_sizeRange[1])*0.5
+    #             obs_theta = np.random.random()*360
+
+    #             # check if obstacle length exceed 45% of world shape, if yes, randomly change obs_sizeRange to 5%~30% of min(h,w)
+    #             obs_len = np.sqrt(obs_a*obs_a + obs_b*obs_b)*2
+    #             if self.obs_len.size > 0 and (np.any(self.obs_len*2 > h*0.9) or np.any(self.obs_len*2 > w*0.9)):
+    #                 self.obs_sizeRange[0]= np.random.randint(500,1500)*1.0/10000 *np.min((h,w))
+    #                 self.obs_sizeRange[1]= np.random.randint(500,3000)*1.0/10000 *np.min((h,w))
+    #                 self.obs_sizeRange= np.sort(self.obs_sizeRange,axis=0).astype(int)
+    #                 print('obs_sizeRange exceed world shape, now changing to ',self.obs_sizeRange.tolist())
+    #                 continue
+    #             # Append obs_len to self.obs_len for later use
+    #             self.obs_len = np.append(self.obs_len, obs_len)
+    #             obs_type = 2  # For testing, always use circle
+    #             obs_b = obs_a
+
+    #             # randomly generate obstacle center coordinate that the obstacle would not exceed world boundary
+    #             bound = np.round(self.obs_len).astype(int) + prox_min
+    #             obs_y = np.random.randint(bound, h-bound)
+    #             obs_x = np.random.randint(bound, w-bound)
+    #             # change the obs_y and obs_x to int
+    #             obs_y = int(obs_y) if np.isscalar(obs_y) else int(np.array(obs_y).flatten()[0])
+    #             obs_x = int(obs_x) if np.isscalar(obs_x) else int(np.array(obs_x).flatten()[0])
+    #             bound = int(bound.item()) if np.size(bound) == 1 else int(np.round(bound).flatten()[0])
+
+    #             print(obs_y, obs_x, obs_a, obs_b, obs_theta, obs_type, "bound", bound)
+    #             # check if the location of obstacle to be added intersect with other obstacle present
+    #             if np.sum(world_obs[obs_y-bound:obs_y+bound, obs_x-bound:obs_x+bound]==self.map_color['obstacle'])!= 0:
+    #                 continue
+
+    #             # create obstacle patch
+    #             # if obs_type == 0:
+    #             #     cthe = np.cos(np.pi/180* obs_theta)
+    #             #     sthe = np.sin(np.pi/180* obs_theta)
+    #             #     rect = np.array([[obs_x + (-obs_a * cthe - -obs_b * sthe), obs_y + (-obs_a * sthe + -obs_b * cthe)],
+    #             #                      [obs_x + (-obs_a * cthe - obs_b * sthe), obs_y + (-obs_a * sthe + obs_b * cthe)],
+    #             #                      [obs_x + (obs_a * cthe - obs_b * sthe), obs_y + (obs_a * sthe + obs_b * cthe)],
+    #             #                      [obs_x + (obs_a * cthe - -obs_b * sthe), obs_y + (obs_a * sthe + -obs_b * cthe)]],
+    #             #                     np.int32)
+    #             #     cv2.fillPoly(world_obs, [rect], self.map_color["obstacle"])
+
+    #             # elif obs_type == 1:
+    #             #     cv2.ellipse(world_obs, (obs_x,obs_y), (int(obs_a),int(obs_b)), obs_theta, 0,360, self.map_color["obstacle"],thickness=-1)
+    #             # else:
+    #             cv2.circle(world_obs, (obs_x,obs_y), int(obs_a), self.map_color["obstacle"],thickness=-1)
+
+    #             # record center coordinate of obstacle
+    #             obs_center = np.array([obs_y, obs_x])
+    #             if self.obs_center.size == 0:
+    #                 self.obs_center = obs_center.reshape(1, 2)
+    #             else:
+    #                 # Append the new obstacle center to the existing array
+    #                 obs_center = obs_center.reshape(1, 2)
+    #                 self.obs_center = np.vstack([self.obs_center, obs_center])
+    #                 # self.obs_center = np.vstack([self.obs_center, obs_center])
+
+    #             break
+
+    #     self.world= world_obs.copy()
+
+    #     return world_obs
+
     def add_obstacle(self):
+        # Reset obstacle arrays each time you call add_obstacle
+        self.obs_len = np.array([])
+        self.obs_center = np.array([]).reshape(0, 2)
+        
+        # IMPORTANT: Reset obs_sizeRange to original values from config
+        # Store original size range if not already stored
+        if not hasattr(self, '_original_obs_sizeRange'):
+            self._original_obs_sizeRange = self.obs_sizeRange.copy()
+        else:
+            # Reset to original values
+            self.obs_sizeRange = self._original_obs_sizeRange.copy()
+
         print(f"Obstacle config is: {self.obstacle_config}")
         """ Randomly add obstacle to world """
         if self.obstacle_config:
@@ -161,9 +262,9 @@ class pseudoSlam():
             for config in f:
                 x, y, w, h = [int(n) for n in config.split(" ")]
                 rect = np.array([[x - w // 2, y - h // 2],
-                                 [x - w // 2, y + h // 2],
-                                 [x + w // 2, y + h // 2],
-                                 [x + w // 2, y - h // 2]],
+                                [x - w // 2, y + h // 2],
+                                [x + w // 2, y + h // 2],
+                                [x + w // 2, y - h // 2]],
                                 np.int32)
                 cv2.fillPoly(self.world, [rect], self.map_color["obstacle"])
             return self.world
@@ -171,77 +272,134 @@ class pseudoSlam():
         if self.obs_num == 0:  # No obstacle added.
             return
 
-        prox_min = 3 # min distance in pixel between added obstacle & obstacle in map
+        # Get world dimensions
+        (h, w) = self.world.shape
+        
+        # Check if world is too small for obstacles
+        min_world_size = 10  # Minimum world size to place obstacles
+        if h < min_world_size or w < min_world_size:
+            print(f"World too small ({h}x{w}) to place obstacles. Minimum size needed: {min_world_size}x{min_world_size}")
+            return self.world
+
+        prox_min = 3  # min distance in pixel between added obstacle & obstacle in map
         self.world = np.zeros_like(self.world)
-        world_obs = np.copy(self.world) # create a new image for adding obstacle
-        (h,w)= self.world.shape
+        world_obs = np.copy(self.world)  # create a new image for adding obstacle
 
-        for i in range(self.obs_num):
-            while (1):
-                # randomly generate obstacle orientation & obstacle size that fall within obstacle_sizeRange
-                obs_a = np.random.randint(self.obs_sizeRange[0], self.obs_sizeRange[1])*0.5
-                obs_b = np.random.randint(self.obs_sizeRange[0], self.obs_sizeRange[1])*0.5
-                obs_theta = np.random.random()*360
+        # Validate obstacle size range before using it
+        min_dim = min(h, w)
+        max_reasonable_size = min_dim // 4  # Maximum 25% of smaller dimension
+        
+        # Fix obstacle size range if it's become invalid
+        if (self.obs_sizeRange[0] >= self.obs_sizeRange[1] or 
+            self.obs_sizeRange[1] <= 0 or
+            self.obs_sizeRange[0] < 0 or
+            self.obs_sizeRange[1] > max_reasonable_size):
+            
+            print(f"Invalid or too large obs_sizeRange: {self.obs_sizeRange.flatten()}. Resetting to reasonable values.")
+            self.obs_sizeRange[0] = max(1, min_dim // 20)  # 5% of smaller dimension
+            self.obs_sizeRange[1] = max(self.obs_sizeRange[0] + 1, max_reasonable_size)
+            print(f"New obs_sizeRange: {self.obs_sizeRange.flatten()}")
 
-                # check if obstacle length exceed 45% of world shape, if yes, randomly change obs_sizeRange to 5%~30% of min(h,w)
-                obs_len= np.sqrt(obs_a*obs_a + obs_b*obs_b)*2
-                if (self.obs_len*2>h*0.9 or self.obs_len*2>w*0.9):
-                    self.obs_sizeRange[0]= np.random.randint(500,1500)*1.0/10000 *np.min((h,w))
-                    self.obs_sizeRange[1]= np.random.randint(500,3000)*1.0/10000 *np.min((h,w))
-                    self.obs_sizeRange= np.sort(self.obs_sizeRange,axis=0).astype(int)
-                    print('obs_sizeRange exceed world shape, now changing to ',self.obs_sizeRange.tolist())
-                    continue
-                # Appnd obs_len to self.obs_len for later use
+        for obs_idx in range(self.obs_num):
+            max_attempts = 50  # Prevent infinite loops
+            attempts = 0
+            obstacle_placed = False
+            
+            while attempts < max_attempts and not obstacle_placed:
+                attempts += 1
+                
+                # Ensure we have valid size range
+                if self.obs_sizeRange[0] >= self.obs_sizeRange[1]:
+                    print(f"Invalid size range during loop: {self.obs_sizeRange.flatten()}. Skipping obstacle {obs_idx + 1}")
+                    break
+                    
+                try:
+                    # Generate obstacle size
+                    obs_a = np.random.randint(int(self.obs_sizeRange[0]), int(self.obs_sizeRange[1])) * 0.5
+                    obs_b = obs_a  # Keep it circular
+                    obs_theta = np.random.random() * 360
+                except ValueError as e:
+                    print(f"Error generating obstacle size: {e}")
+                    print(f"obs_sizeRange: {self.obs_sizeRange.flatten()}")
+                    break
+
+                # Calculate obstacle length
+                obs_len = np.sqrt(obs_a*obs_a + obs_b*obs_b) * 2
+                
+                # Check if obstacle length exceed reasonable size relative to world
+                if obs_len > min_dim * 0.4:  # More than 40% of smaller dimension
+                    print(f"Generated obstacle too large ({obs_len:.1f}) for world ({h}x{w}). Reducing size.")
+                    obs_a = min_dim * 0.15  # Use 15% of smaller dimension
+                    obs_b = obs_a
+                    obs_len = obs_a * 2
+
+                # Check if this obstacle or previous obstacles are too big
+                if self.obs_len.size > 0 and (np.any(self.obs_len*2 > h*0.9) or np.any(self.obs_len*2 > w*0.9)):
+                    # Don't modify the original size range, just skip this iteration
+                    print('Some obstacles exceed 90% of world shape, trying smaller obstacle')
+                    obs_a = min_dim * 0.1  # Use even smaller size
+                    obs_b = obs_a
+                    obs_len = obs_a * 2
+                    
+                # Append obs_len to self.obs_len for later use
                 self.obs_len = np.append(self.obs_len, obs_len)
-
-                # randomly select shape type of obstacle [0: rectangle; 1: ellipse; 2: circle]
                 obs_type = 2  # For testing, always use circle
-                obs_b = obs_a
 
-                # randomly generate obstacle center coordinate that the obstacle would not exceed world boundary
-                bound = np.round(self.obs_len).astype(int) + prox_min
-                obs_y = np.random.randint(bound, h-bound)
-                obs_x = np.random.randint(bound, w-bound)
-                # change the obs_y and obs_x to int
+                # Calculate bound
+                bound = int(np.round(obs_len)) + prox_min
+                
+                # Check if bound allows valid placement
+                if bound >= h//2 or bound >= w//2:
+                    print(f"Obstacle bound ({bound}) too large for world ({h}x{w}). Trying smaller obstacle.")
+                    # Remove the problematic obs_len we just added
+                    self.obs_len = self.obs_len[:-1]
+                    continue
+
+                try:
+                    # Generate obstacle center coordinates
+                    obs_y = np.random.randint(bound, h - bound)
+                    obs_x = np.random.randint(bound, w - bound)
+                except ValueError:
+                    print(f"Cannot generate valid coordinates. Bound: {bound}, World: {h}x{w}")
+                    # Remove the problematic obs_len we just added
+                    self.obs_len = self.obs_len[:-1]
+                    break
+                    
+                # Convert to int (bound is already int, obs_x and obs_y should be scalars from randint)
                 obs_y = int(obs_y)
                 obs_x = int(obs_x)
-                bound = int(bound)
+                # bound is already an int, no conversion needed
 
-                print(obs_y, obs_x, obs_a, obs_b, obs_theta, obs_type, "bound", bound)
-                # check if the location of obstacle to be added intersect with other obstacle present
-                if np.sum(world_obs[obs_y-bound:obs_y+bound, obs_x-bound:obs_x+bound]==self.map_color['obstacle'])!= 0:
+                print(f"Placing obstacle {obs_idx + 1}: y={obs_y}, x={obs_x}, radius={obs_a:.1f}, bound={bound}")
+                
+                # Check bounds for array slicing
+                y_min = max(0, obs_y - bound)
+                y_max = min(h, obs_y + bound)
+                x_min = max(0, obs_x - bound)
+                x_max = min(w, obs_x + bound)
+                
+                # Check if the location intersects with existing obstacles
+                if np.sum(world_obs[y_min:y_max, x_min:x_max] == self.map_color['obstacle']) != 0:
                     continue
+                    
+                # Place the obstacle
+                cv2.circle(world_obs, (obs_x, obs_y), int(obs_a), self.map_color["obstacle"], thickness=-1)
 
-                # create obstacle patch
-                if obs_type == 0:
-                    cthe = np.cos(np.pi/180* obs_theta)
-                    sthe = np.sin(np.pi/180* obs_theta)
-                    rect = np.array([[obs_x + (-obs_a * cthe - -obs_b * sthe), obs_y + (-obs_a * sthe + -obs_b * cthe)],
-                                     [obs_x + (-obs_a * cthe - obs_b * sthe), obs_y + (-obs_a * sthe + obs_b * cthe)],
-                                     [obs_x + (obs_a * cthe - obs_b * sthe), obs_y + (obs_a * sthe + obs_b * cthe)],
-                                     [obs_x + (obs_a * cthe - -obs_b * sthe), obs_y + (obs_a * sthe + -obs_b * cthe)]],
-                                    np.int32)
-                    cv2.fillPoly(world_obs, [rect], self.map_color["obstacle"])
-
-                elif obs_type == 1:
-                    cv2.ellipse(world_obs, (obs_x,obs_y), (int(obs_a),int(obs_b)), obs_theta, 0,360, self.map_color["obstacle"],thickness=-1)
-                else:
-                    cv2.circle(world_obs, (obs_x,obs_y), int(obs_a), self.map_color["obstacle"],thickness=-1)
-
-                # record center coordinate of obstacle
+                # Record center coordinate of obstacle
                 obs_center = np.array([obs_y, obs_x])
                 if self.obs_center.size == 0:
                     self.obs_center = obs_center.reshape(1, 2)
                 else:
-                    # Append the new obstacle center to the existing array
                     obs_center = obs_center.reshape(1, 2)
                     self.obs_center = np.vstack([self.obs_center, obs_center])
-                    # self.obs_center = np.vstack([self.obs_center, obs_center])
 
-                break
+                obstacle_placed = True
+                print(f"Successfully placed obstacle {obs_idx + 1}")
+            
+            if not obstacle_placed:
+                print(f"Warning: Could not place obstacle {obs_idx + 1} after {max_attempts} attempts")
 
-        self.world= world_obs.copy()
-
+        self.world = world_obs.copy()
         return world_obs
 
     def _randomizeRobotPose(self):
@@ -326,12 +484,12 @@ class pseudoSlam():
         [y_noise_rangeCoordMat, x_noise_rangeCoordMat, y_coord, x_coord] = self._laser_noise(y_rangeCoordMat, x_rangeCoordMat, y_coord, x_coord, b)
         [y_err_coord, x_err_coord, y_noise_ind, x_noise_ind] = self._slam_error(y_noise_rangeCoordMat, x_noise_rangeCoordMat)
 
+        [y_err_coord, x_err_coord, _, _] = self._slam_error(y_noise_rangeCoordMat, x_noise_rangeCoordMat)
+
         inBound_ind= util.within_bound(np.array([y_err_coord,x_err_coord]),self.world.shape)
         y_coord = y_coord[inBound_ind]
         x_coord = x_coord[inBound_ind]
         return y_err_coord, x_err_coord, y_coord, x_coord
-
-
     def _build_map_with_rangeCoordMat(self, y_rangeCoordMat, x_rangeCoordMat):
         # Round y and x coord into int
         y_rangeCoordMat = (np.round(y_rangeCoordMat)).astype(np.int32)
@@ -477,6 +635,134 @@ class pseudoSlam():
             angle_ranges.append(angles_deg)
 
         return np.array(angle_ranges)
+        scan_array = self.get_laser_scan()
+        # angle_range() returns angles relative to robot's orientation (already centered)
+        angle_min, angle_max = self.angle_range()
+        # Ensure angle_min and angle_max are Python scalars
+        angle_min = int(angle_min.item() if hasattr(angle_min, "item") else angle_min)
+        angle_max = int(angle_max.item() if hasattr(angle_max, "item") else angle_max)
+        # Handle wrap-around (e.g., 350 to 10 degrees)
+        if angle_max < angle_min:
+            angles = np.arange(angle_min, 360).tolist() + np.arange(0, angle_max + 1).tolist()
+        else:
+            angles = np.arange(angle_min, angle_max + 1).tolist()
+        # Convert to zero-based index and wrap around using modulo 360
+        angles = [(angle - 1) % 360 for angle in angles]
+        # Create an array of 360 zeros to start with
+        # label_array_2 = np.zeros(360, dtype=np.int32)
+        for angle in angles:
+            dist = self.distance_to_obstacle(angle)
+            if scan_array[angle] <= dist:
+                angle_rad = np.deg2rad(angle) + self.robotPose[2]
+                dy = -np.sin(angle_rad) * dist
+                dx = np.cos(angle_rad) * dist
+                if np.isfinite(dist):
+                    end_y = int(self.robotPose[0] + dy)
+                    end_x = int(self.robotPose[1] + dx)
+                    cv2.line(self.slamMap, (int(self.robotPose[1]), int(self.robotPose[0])),
+                            (end_x, end_y), (255, 0, 0), thickness=1)
+        #         label_array_2[angle] = 1
+        # print('Second array:',  label_array_2)
+
+    def draw_laser_scan_on_map(self):
+        scan_array = self.get_laser_scan()
+        angle_ranges = self.angle_range()  # shape (N, 2), each row is [start_angle_deg, end_angle_deg]
+        for angle_range in angle_ranges:
+            angle_min, angle_max = angle_range
+            # Ensure angle_min and angle_max are Python scalars
+            angle_min = int(angle_min.item() if hasattr(angle_min, "item") else angle_min)
+            angle_max = int(angle_max.item() if hasattr(angle_max, "item") else angle_max)
+            # Handle wrap-around (e.g., 350 to 10 degrees)
+            if angle_max < angle_min:
+                angles = np.arange(angle_min, 360).tolist() + np.arange(0, angle_max + 1).tolist()
+            else:
+                angles = np.arange(angle_min, angle_max + 1).tolist()
+            # Convert to zero-based index and wrap around using modulo 360
+            angles = [(angle - 1) % 360 for angle in angles]
+            for angle in angles:
+                dist = self.distance_to_obstacle(angle)
+                if scan_array[angle] <= dist:
+                    angle_rad = np.deg2rad(angle) + self.robotPose[2]
+                    dy = -np.sin(angle_rad) * dist
+                    dx = np.cos(angle_rad) * dist
+                    if np.isfinite(dist):
+                        end_y = int(self.robotPose[0] + dy)
+                        end_x = int(self.robotPose[1] + dx)
+                        cv2.line(self.slamMap, (int(self.robotPose[1]), int(self.robotPose[0])),
+                                (end_x, end_y), (255, 0, 0), thickness=1)
+
+    def draw_laser_scan_on_map_ml(self, labels):
+        """
+        Draw laser scan lines on the map for angles where labels == 1.
+        labels: array-like of length 360, with 1 indicating to draw at that angle.
+        """
+        scan_array = self.get_laser_scan()
+        labels = np.atleast_1d(labels)
+        angles = np.where(labels == 1)[0]
+        for angle in angles:
+            dist = scan_array[angle]
+            angle_rad = np.deg2rad(angle) + self.robotPose[2]
+            dy = -np.sin(angle_rad) * dist
+            dx = np.cos(angle_rad) * dist
+            if np.isfinite(dist):
+                end_y = int(self.robotPose[0] + dy)
+                end_x = int(self.robotPose[1] + dx)
+                cv2.line(self.slamMap, (int(self.robotPose[1]), int(self.robotPose[0])),
+                        (end_x, end_y), (255, 0, 0), thickness=1)
+
+    def respawn_robot(self):
+        """ Respawn the robot at a random position within the world bounds 
+        Everything is unexplored again"""
+        self.robotPose = self._randomizeRobotPose()
+        self.robotCrashed_flag = False
+        self.slamMap = np.ones(self.world.shape) * self.map_color["uncertain"]
+        self.dslamMap = np.ones(self.world.shape) * self.map_color["uncertain"]
+        self.build_map(self.robotPose)
+        return
+        
+    def plot_laser_scan_on_map(self, scan_array):
+        ry, rx, rtheta = self.robotPose     # (y, x, theta), theta in radians
+
+        # Ensure slamMap is BGR
+        if len(self.slamMap.shape) == 2 or self.slamMap.shape[2] == 1:
+            self.slamMap = self.slamMap.astype(np.uint8)
+
+        for angle in range(360):
+            dist = scan_array[angle]
+            if not np.isfinite(dist):
+                continue  # skip invalid readings
+
+            angle_rad = np.deg2rad(angle) + rtheta
+            dx = np.cos(angle_rad) * dist
+            dy = -np.sin(angle_rad) * dist  # image y-axis is downward
+
+            end_x = int(round(rx + dx))
+            end_y = int(round(ry + dy))
+            start_x = int(round(rx))
+            start_y = int(round(ry))
+
+            if 0 <= end_x < self.slamMap.shape[1] and 0 <= end_y < self.slamMap.shape[0]:
+                cv2.line(self.slamMap, (start_x, start_y), (end_x, end_y), (0, 255, 0), thickness=1)
+
+
+    def plot_ml_preds(self, ml_preds):
+        # ml_preds is an array of 360 elements, with a 1 for each angle where the model predicts an obstacle
+        # First, get the angles where the model predicts an obstacle
+        scan_array = self.get_laser_scan()
+        ml_preds = np.atleast_1d(ml_preds)
+        angles = np.where(ml_preds == 1)[0]
+        for angle in angles:
+            dist = self.distance_to_obstacle(angle)
+            if scan_array[angle] <= dist:
+                angle_rad = np.deg2rad(angle) + self.robotPose[2]
+                dy = -np.sin(angle_rad) * dist
+                dx = np.cos(angle_rad) * dist
+                if np.isfinite(dist):
+                    end_y = int(self.robotPose[0] + dy)
+                    end_x = int(self.robotPose[1] + dx)
+                    cv2.line(self.slamMap, (int(self.robotPose[1]), int(self.robotPose[0])),
+                            (end_x, end_y), (255, 0, 0), thickness=1)
+
 
     def distance_to_obstacle(self, angle_deg=None):
         """
@@ -493,32 +779,29 @@ class pseudoSlam():
         else:
             obs_y, obs_x = self.obs_center[0, 0], self.obs_center[0, 1]
 
-        # Get robot position
+        # Get robot position (assumed to be in pixel coordinates!)
         robot_y, robot_x = self.robotPose[0], self.robotPose[1]
 
         if angle_deg is None:
             # Default: distance to obstacle center
-            distance = np.sqrt((obs_y - robot_y) ** 2 + (obs_x - robot_x) ** 2)
-            print(f"Distance to obstacle center: {distance:.2f} pixels")
-            return distance
+            return np.sqrt((obs_y - robot_y) ** 2 + (obs_x - robot_x) ** 2)
 
-        # Calculate angle in radians (relative to robot orientation)
+        # Convert angle to radians and apply robot orientation
         angle_rad = np.deg2rad(angle_deg) + self.robotPose[2]
 
         # Ray casting parameters
-        max_range = 200  # or self.laser_range if available
+        max_range = 200
         step_size = 1
 
         # Ray direction
-        dy = -np.sin(angle_rad) * step_size  # negative for image y-axis
+        dy = -np.sin(angle_rad) * step_size  # flip Y because image Y goes down
         dx = np.cos(angle_rad) * step_size
 
         # Start at robot position
-        current_y = robot_y
-        current_x = robot_x
+        current_y = float(robot_y)
+        current_x = float(robot_x)
         distance = 0
 
-        # Use the ground truth world map for obstacle detection
         while distance < max_range:
             current_y += dy
             current_x += dx
@@ -532,13 +815,13 @@ class pseudoSlam():
                 grid_x < 0 or grid_x >= self.world.shape[1]):
                 break
 
-            # Check if hit obstacle
-            if self.world[grid_y, grid_x] == self.map_color['obstacle']:
-                print(f"Distance to obstacle at angle {angle_deg}°: {distance:.2f} pixels")
+            # FIXED: Check if pixel color matches obstacle color
+            if np.all(self.world[grid_y, grid_x] == self.map_color['obstacle']):
                 return distance
 
         print(f"No obstacle detected at angle {angle_deg}° within range.")
         return float('inf')
+
 
     def moveRobot(self, moveAction):
         """ move robot with moveAction with forward | left | right """
@@ -652,9 +935,13 @@ class pseudoSlam():
                     break
                 
                 # Check if hit something (assuming 0 = free, 1 = occupied in map)
-                if self.slamMap[grid_y, grid_x] > 0.5:  # something detected
+                cell = self.slamMap[grid_y, grid_x]
+                if cell == -101:
+                    # unexplored cell, stop ray
                     break
-            
+                elif cell == 100:
+                    # obstacle cell, stop ray
+                    break
             distances[i] = distance
         
         return distances
@@ -670,8 +957,12 @@ class pseudoSlam():
 
         # make a circle patch around robot location and check if there is obstacle pixel inside the circle
         robotPatch, _ = util.make_circle(r,1)
-        worldPatch= self.world[py-r:py+r+1, px-r:px+r+1]
-        worldPatch= worldPatch*robotPatch
+        worldPatch = self.world[py - r:py + r + 1, px - r:px + r + 1]
+        # Ensure worldPatch and robotPatch have the same shape
+        min_shape = (min(worldPatch.shape[0], robotPatch.shape[0]), min(worldPatch.shape[1], robotPatch.shape[1]))
+        worldPatch = worldPatch[:min_shape[0], :min_shape[1]]
+        robotPatch = robotPatch[:min_shape[0], :min_shape[1]]
+        worldPatch = worldPatch * robotPatch
 
         return np.sum(worldPatch==self.map_color["obstacle"])!=0
 

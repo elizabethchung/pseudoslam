@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 
 def labels_to_min_max(labels):
     labels = np.atleast_2d(labels)
@@ -25,6 +26,28 @@ def labels_to_min_max(labels):
                 max_indices.append(sorted_indices[max_gap_idx])
     return np.array(min_indices), np.array(max_indices)
 
+def get_obstacle_counts(batch_labels):
+    if isinstance(batch_labels, np.ndarray):
+        batch_labels = torch.tensor(batch_labels)
+
+    if batch_labels.ndim == 1:
+        batch_labels = batch_labels.unsqueeze(0)  # (360,) → (1, 360)
+
+    counts = []
+    for row in batch_labels:
+        row = row.int()
+        extended = torch.cat([row, row[:1]])
+        diff = torch.diff(extended)
+        starts = (diff == 1).sum()
+        ends = (diff == -1).sum()
+        count = min(starts, ends)
+
+        if row.sum() == 360:
+            count = 1
+
+        counts.append(count)
+
+    return torch.tensor(counts, dtype=torch.float32).unsqueeze(1)
 
 data = np.array([1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
@@ -37,6 +60,8 @@ data = np.array([1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
 , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1])
 
-min_indices, max_indices = labels_to_min_max(data)
-print("Min Indices:", min_indices)
-print("Max Indices:", max_indices)
+# min_indices, max_indices = labels_to_min_max(data)
+# print("Min Indices:", min_indices)
+# print("Max Indices:", max_indices)
+counts = get_obstacle_counts(data)
+print("Obstacle Counts:", counts)

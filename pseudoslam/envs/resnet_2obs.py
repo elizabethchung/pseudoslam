@@ -568,7 +568,7 @@ class ResidualBlock(nn.Module):
         out = out + residual
         return self.relu(out)
 
-class ImprovedResNetNoGating(nn.Module):
+class ImprovedResNetNoGating2(nn.Module):
     def __init__(self):
         super().__init__()
         self.max_obstacles = 2
@@ -844,39 +844,7 @@ test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, pin
 
 
 # Use improved model without gating
-resnet = ImprovedResNetNoGating().to(device)
-
-def train_model_one_batch():
-    optimizer = optim.Adam(resnet.parameters(), lr=0.0005, weight_decay=1e-4)
-
-    # Freeze one batch from the train loader
-    batch = next(iter(train_loader))
-    distances, labels, _, tsdf = batch
-    distances = distances.to(device)
-    labels = labels.to(device)
-    tsdf = tsdf.to(device)
-
-    # Prepare static target for this batch
-    obstacle_targets = generate_multi_obstacle_targets(labels)
-    print("Targets (sample):", obstacle_targets[0])
-
-
-    resnet.train()
-
-    for epoch in range(200):
-        optimizer.zero_grad()
-
-        # Forward pass
-        predictions = resnet(distances, tsdf)  # unpack: min_logits, max_logits, confidence
-
-        # Loss computation
-        loss, components = improved_multi_obstacle_loss(predictions, obstacle_targets)
-
-        # Backprop + update
-        loss.backward()
-        optimizer.step()
-
-        print(f"Epoch {epoch}: Loss = {loss.item():.4f}")
+resnet = ImprovedResNetNoGating2().to(device)
 
 
 def train_model():
@@ -906,7 +874,7 @@ def train_model():
     for epoch in range(num_epochs):
         resnet.train()
         epoch_loss = 0.0
-        epoch_components = {'position_loss': 0.0, 'confidence_loss': 0.0}
+        epoch_components = {'position_loss': 0.0, 'confidence_loss': 0.0, 'span_constraint_loss': 0.0, 'diversity_loss': 0.0}
         batch_count = 0
         
         for batch_idx, (distances, labels, _, tsdf) in enumerate(train_loader):
@@ -1327,18 +1295,18 @@ def test_model_with_improved_processing(loss_history, loss_components):
     plt.xlabel('Epochs'); plt.ylabel('Loss'); plt.title('Training Loss'); plt.legend()
 
     plt.subplot(2, 3, 2)
-    for key, values in loss_components.items():
-        # Skip if empty
+    for key in ['position_loss', 'confidence_loss', 'span_constraint_loss', 'diversity_loss']:
+        values = loss_components.get(key, None)
         if values is None or len(values) == 0:
             continue
 
-        # Convert tensors to CPU + numpy
-        if hasattr(values, 'cpu'):
+        # Convert to numpy array for plotting
+        if isinstance(values, torch.Tensor):
             values = values.cpu().numpy()
         elif isinstance(values, list):
-            values = [v.cpu().item() if hasattr(v, 'cpu') else v for v in values]
+            values = np.array([v.cpu().item() if isinstance(v, torch.Tensor) else float(v) for v in values])
 
-        # Skip if still wrong shape
+        # Ensure correct length for plotting
         if len(values) != num_epochs:
             print(f"Skipping '{key}' due to mismatched length: expected {num_epochs}, got {len(values)}")
             continue
@@ -1374,7 +1342,7 @@ def test_model_with_improved_processing_single(dataloader, num_expected_obstacle
     Returns:
         all_predictions (List[List[Tuple[int, int]]]): List of predicted spans for each sample
     """
-    test_resnet = ImprovedResNetNoGating().to(device)
+    test_resnet = ImprovedResNetNoGating2().to(device)
     model_path = os.path.join(data_dir, "resnet_2.pth")
     test_resnet.load_state_dict(torch.load(model_path))
     test_resnet.eval()
