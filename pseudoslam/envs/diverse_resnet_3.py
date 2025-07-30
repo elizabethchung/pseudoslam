@@ -429,21 +429,21 @@ class LidarTSDFDataset(Dataset):
             if self.mask is not None:
                 self.mask = self.mask[:min_len]
 
-        # # === TSDF Caching ===
-        # if tsdf_cache_path and os.path.exists(tsdf_cache_path):
-        #     print(f"Loading TSDF from {tsdf_cache_path}")
-        #     self.tsdf_maps = np.load(tsdf_cache_path)
-        # else:
-        #     print("Computing TSDF maps...")
-        #     self.tsdf_maps = lidar_to_tsdf_obstacles(self.data)
-        #     if tsdf_cache_path:
-        #         np.save(tsdf_cache_path, self.tsdf_maps)
-        #         print(f"Saved TSDF maps to {tsdf_cache_path}")
-        print("Computing TSDF maps...")
-        self.tsdf_maps = lidar_to_tsdf_obstacles(self.data)
-        if tsdf_cache_path:
-            np.save(tsdf_cache_path, self.tsdf_maps)
-            print(f"Saved TSDF maps to {tsdf_cache_path}")
+        # === TSDF Caching ===
+        if tsdf_cache_path and os.path.exists(tsdf_cache_path):
+            print(f"Loading TSDF from {tsdf_cache_path}")
+            self.tsdf_maps = np.load(tsdf_cache_path)
+        else:
+            print("Computing TSDF maps...")
+            self.tsdf_maps = lidar_to_tsdf_obstacles(self.data)
+            if tsdf_cache_path:
+                np.save(tsdf_cache_path, self.tsdf_maps)
+                print(f"Saved TSDF maps to {tsdf_cache_path}")
+        # print("Computing TSDF maps...")
+        # self.tsdf_maps = lidar_to_tsdf_obstacles(self.data)
+        # if tsdf_cache_path:
+        #     np.save(tsdf_cache_path, self.tsdf_maps)
+        #     print(f"Saved TSDF maps to {tsdf_cache_path}")
 
     def __len__(self):
         return len(self.data)
