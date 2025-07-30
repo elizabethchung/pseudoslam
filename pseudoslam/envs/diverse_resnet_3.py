@@ -48,7 +48,7 @@ def visualize_input_sample(lidar_data, tsdf_data, label, pred, mask=None):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
-num_epochs = 50
+num_epochs = 150
 batch_size = 64
 learning_rate = 0.00005
 torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner for faster training
@@ -240,7 +240,7 @@ def extract_min_max_from_targets(batch_targets, device):
 def improved_multi_obstacle_loss_with_constraints(predictions, obstacle_targets,
                                                 alpha=0.5,
                                                 confidence_weight=1.0,
-                                                span_constraint_weight=0.3,
+                                                span_constraint_weight=0.4,
                                                 diversity_weight=1.0):
     """
     Enhanced loss function with span constraints and diversity enforcement
