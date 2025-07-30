@@ -1,4 +1,3 @@
-pseudoslam/envs/data/
-pseudoslam-backup/envs/data/
-pseudoslam-backup/
-pseudoslam-clean/
+pseudoslam/envs/data
+pseudoslam-backup
+pseudoslam-clean
