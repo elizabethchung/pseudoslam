@@ -14,7 +14,7 @@ os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 if torch.cuda.is_available():
-    device = torch.device("cuda")
+    device = torch.device("cuda:1" if torch.cuda.device_count() > 1 else "cuda:0")
 else:
     device = torch.device("cpu")
 print(f"Using device: {device}")
