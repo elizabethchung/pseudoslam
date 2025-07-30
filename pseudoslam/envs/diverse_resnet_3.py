@@ -753,8 +753,8 @@ test_dataset = LidarTSDFDataset(
 # debug_dataset_labels(train_dataset, num_samples=5)
 # debug_dataset_labels(test_dataset, num_samples=5)
 
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=4)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=4)
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=8)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=8)
 
 
 # Use improved model without gating
