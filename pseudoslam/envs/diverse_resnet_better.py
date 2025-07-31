@@ -48,7 +48,7 @@ def visualize_input_sample(lidar_data, tsdf_data, label, pred, mask=None):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
-num_epochs = 40
+num_epochs = 1
 batch_size = 32
 learning_rate = 0.00005
 torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner for faster training
@@ -1168,7 +1168,7 @@ inspect_dataset_constructor()
 
 if __name__ == "__main__":
     # train_model_few_batches()
-    loss_history, loss_components = train_model()
+    model, loss_history, loss_components = train_model()
     obstacle_accuracy, avg_error = test_model_with_improved_processing(loss_history, loss_components)
     # sample_lidar = testing_lidar[200]  # Use the first sample for testing
     # sample_tsdf = lidar_to_tsdf_obstacles(np.expand_dims(sample_lidar, axis=0))  # Get corresponding TSDF
