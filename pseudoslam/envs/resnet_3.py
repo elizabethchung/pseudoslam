@@ -430,20 +430,20 @@ class LidarTSDFDataset(Dataset):
                 self.mask = self.mask[:min_len]
 
         # === TSDF Caching ===
-        if tsdf_cache_path and os.path.exists(tsdf_cache_path):
-            print(f"Loading TSDF from {tsdf_cache_path}")
-            self.tsdf_maps = np.load(tsdf_cache_path)
-        else:
-            print("Computing TSDF maps...")
-            self.tsdf_maps = lidar_to_tsdf_obstacles(self.data)
-            if tsdf_cache_path:
-                np.save(tsdf_cache_path, self.tsdf_maps)
-                print(f"Saved TSDF maps to {tsdf_cache_path}")
-        # print("Computing TSDF maps...")
-        # self.tsdf_maps = lidar_to_tsdf_obstacles(self.data)
-        # if tsdf_cache_path:
-        #     np.save(tsdf_cache_path, self.tsdf_maps)
-        #     print(f"Saved TSDF maps to {tsdf_cache_path}")
+        # if tsdf_cache_path and os.path.exists(tsdf_cache_path):
+        #     print(f"Loading TSDF from {tsdf_cache_path}")
+        #     self.tsdf_maps = np.load(tsdf_cache_path)
+        # else:
+        #     print("Computing TSDF maps...")
+        #     self.tsdf_maps = lidar_to_tsdf_obstacles(self.data)
+        #     if tsdf_cache_path:
+        #         np.save(tsdf_cache_path, self.tsdf_maps)
+        #         print(f"Saved TSDF maps to {tsdf_cache_path}")
+        print("Computing TSDF maps...")
+        self.tsdf_maps = lidar_to_tsdf_obstacles(self.data)
+        if tsdf_cache_path:
+            np.save(tsdf_cache_path, self.tsdf_maps)
+            print(f"Saved TSDF maps to {tsdf_cache_path}")
 
     def __len__(self):
         return len(self.data)
@@ -740,14 +740,14 @@ train_dataset = LidarTSDFDataset(
     training_lidar, 
     (training_min_indices, training_max_indices), 
     training_mask,
-    tsdf_cache_path=os.path.join(data_dir, "tsdf_train_3obs.npy")
+    tsdf_cache_path=os.path.join(data_dir, "tsdf_train_3.npy")
 )
 
 test_dataset = LidarTSDFDataset(
     testing_lidar, 
     (testing_min_indices, testing_max_indices), 
     testing_mask,
-    tsdf_cache_path=os.path.join(data_dir, "tsdf_test_3obs.npy")
+    tsdf_cache_path=os.path.join(data_dir, "tsdf_test_3.npy")
 )
 
 # debug_dataset_labels(train_dataset, num_samples=5)
