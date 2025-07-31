@@ -48,7 +48,7 @@ def visualize_input_sample(lidar_data, tsdf_data, label, pred, mask=None):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
-num_epochs = 50
+num_epochs = 20
 batch_size = 32
 learning_rate = 0.00005
 torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner for faster training
@@ -237,13 +237,19 @@ def extract_min_max_from_targets(batch_targets, device):
         torch.tensor(max_indices, device=device, dtype=torch.long),
     )
 
-def improved_multi_obstacle_loss_with_constraints(predictions, obstacle_targets,
-                                   alpha=1.0, confidence_weight=0.5,
-                                   diversity_weight=0.1, max_ce_loss=10.0,
-                                   empty_slot_penalty=0.05):
+def improved_multi_obstacle_loss_with_constraints(predictions, obstacle_targets, 
+                               alpha=1.0, confidence_weight=0.1, 
+                               diversity_weight=0.05,
+                               max_ce_loss=10.0):
     """
-    Enhanced loss function that encourages finding all obstacles
+    Stabilized loss function with clamping and confidence diversity loss
     """
+    def binary_focal_loss(logits, targets, gamma=2.0, alpha=0.75):
+        probs = torch.sigmoid(logits)
+        pt = probs * targets + (1 - probs) * (1 - targets)
+        loss = -alpha * (1 - pt) ** gamma * torch.log(pt + 1e-8)
+        return loss.mean()
+
     min_pred_logits = predictions['min_logits']  # (B, 3, 360)
     max_pred_logits = predictions['max_logits']  # (B, 3, 360)
     confidence_logits = predictions['confidence']  # (B, 3, 360)
@@ -254,7 +260,6 @@ def improved_multi_obstacle_loss_with_constraints(predictions, obstacle_targets,
     total_position_loss = 0.0
     total_confidence_loss = 0.0
     total_diversity_loss = 0.0
-    total_completeness_loss = 0.0  # New: encourage using all slots
     num_position_losses = 0
     num_confidence_losses = 0
     num_diversity_pairs = 0
@@ -265,7 +270,7 @@ def improved_multi_obstacle_loss_with_constraints(predictions, obstacle_targets,
 
         confidence_probs = torch.sigmoid(confidence_logits[batch_idx])  # (max_obstacles, 360)
 
-        # Diversity loss - encourage different slots to focus on different areas
+        # Compute IoU-based overlap penalty between all slot pairs
         for i in range(max_obstacles):
             for j in range(i + 1, max_obstacles):
                 inter = torch.sum(torch.min(confidence_probs[i], confidence_probs[j]))
@@ -275,43 +280,24 @@ def improved_multi_obstacle_loss_with_constraints(predictions, obstacle_targets,
                     total_diversity_loss += iou
                     num_diversity_pairs += 1
 
-        # Completeness loss - encourage using all slots when there are obstacles
-        if num_obstacles > 0:
-            slot_usage = torch.sum(confidence_probs, dim=1)  # (max_obstacles,)
-            # Encourage slots to be either fully used or not used at all
-            for slot_idx in range(max_obstacles):
-                if slot_idx < num_obstacles:
-                    # Should be active - penalize low usage
-                    usage_penalty = torch.relu(10.0 - slot_usage[slot_idx])
-                    total_completeness_loss += usage_penalty
-                else:
-                    # Should be inactive - penalize high usage
-                    usage_penalty = torch.relu(slot_usage[slot_idx] - 5.0)
-                    total_completeness_loss += usage_penalty * empty_slot_penalty
-
-        # Position and confidence losses
         for slot_idx in range(max_obstacles):
             if slot_idx < num_obstacles:
                 region = obstacle_regions[slot_idx]
                 min_class, max_class = region[0], region[1]
 
-                # Position losses with adaptive weighting
+                # Position losses (cross-entropy, clamped)
                 ce_min = F.cross_entropy(min_pred_logits[batch_idx, slot_idx:slot_idx+1],
-                                       torch.tensor([min_class], device=min_pred_logits.device))
+                                         torch.tensor([min_class], device=min_pred_logits.device))
                 ce_max = F.cross_entropy(max_pred_logits[batch_idx, slot_idx:slot_idx+1],
-                                       torch.tensor([max_class], device=max_pred_logits.device))
+                                         torch.tensor([max_class], device=max_pred_logits.device))
 
                 ce_min = torch.clamp(ce_min, 0, max_ce_loss)
                 ce_max = torch.clamp(ce_max, 0, max_ce_loss)
 
-                # Weight by obstacle size - smaller obstacles get higher weight
-                obstacle_size = min(abs(max_class - min_class), 360 - abs(max_class - min_class))
-                size_weight = 1.0 + (20.0 / max(obstacle_size, 5))  # Boost small obstacles
-
-                total_position_loss += (ce_min + ce_max) * size_weight
+                total_position_loss += ce_min + ce_max
                 num_position_losses += 2
 
-                # Confidence target
+                # Confidence BCE loss
                 confidence_target = torch.zeros_like(confidence_logits[batch_idx, slot_idx])
                 if min_class <= max_class:
                     confidence_target[min_class:max_class + 1] = 1.0
@@ -319,42 +305,39 @@ def improved_multi_obstacle_loss_with_constraints(predictions, obstacle_targets,
                     confidence_target[min_class:] = 1.0
                     confidence_target[:max_class + 1] = 1.0
 
-                conf_loss = F.binary_cross_entropy_with_logits(
+                conf_loss = binary_focal_loss(
                     confidence_logits[batch_idx, slot_idx],
                     confidence_target
                 )
                 conf_loss = torch.clamp(conf_loss, 0, max_ce_loss)
+
                 total_confidence_loss += conf_loss
                 num_confidence_losses += 1
 
             else:
-                # Empty slot - light penalty only
+                # No obstacle - penalize high confidence
                 conf_loss = F.binary_cross_entropy_with_logits(
                     confidence_logits[batch_idx, slot_idx],
                     torch.zeros_like(confidence_logits[batch_idx, slot_idx])
                 )
                 conf_loss = torch.clamp(conf_loss, 0, max_ce_loss)
-                total_confidence_loss += conf_loss * empty_slot_penalty
+                total_confidence_loss += conf_loss * 0.1
                 num_confidence_losses += 1
 
-    # Normalize losses
     avg_position_loss = total_position_loss / max(num_position_losses, 1)
     avg_confidence_loss = total_confidence_loss / max(num_confidence_losses, 1)
     avg_diversity_loss = total_diversity_loss / max(num_diversity_pairs, 1)
-    avg_completeness_loss = total_completeness_loss / batch_size
 
     total_loss = (
         alpha * avg_position_loss +
         confidence_weight * avg_confidence_loss +
-        diversity_weight * avg_diversity_loss +
-        0.1 * avg_completeness_loss  # Completeness encouragement
+        diversity_weight * avg_diversity_loss
     )
 
     return total_loss, {
         'position_loss': avg_position_loss.item(),
         'confidence_loss': avg_confidence_loss.item(),
         'diversity_loss': avg_diversity_loss.item(),
-        'completeness_loss': avg_completeness_loss.item(),
         'num_position_losses': num_position_losses,
         'num_confidence_losses': num_confidence_losses,
         'num_diversity_pairs': num_diversity_pairs
@@ -472,36 +455,33 @@ class ImprovedResNetNoGating3(nn.Module):
     def __init__(self):
         super().__init__()
         self.max_obstacles = 3
-       
-        # More powerful LiDAR processing
-        self.lidar_layer1 = ResidualBlock(1, 64, dropout=0.1)
-        self.lidar_layer2 = ResidualBlock(64, 128, dropout=0.1)
-        self.lidar_layer3 = ResidualBlock(128, 256, dropout=0.2)
-        self.lidar_layer4 = ResidualBlock(256, 256, dropout=0.2)
+        
+        # Enhanced LiDAR processing with attention
+        self.lidar_layer1 = ResidualBlock(1, 32, dropout=0.2)
+        self.lidar_layer2 = ResidualBlock(32, 64, dropout=0.2)
+        self.lidar_layer3 = ResidualBlock(64, 128, dropout=0.3)
+        self.lidar_layer4 = ResidualBlock(128, 128, dropout=0.3)
 
-        # Multi-head attention for LiDAR
-        self.lidar_attention = nn.MultiheadAttention(embed_dim=256, num_heads=8, batch_first=True)
-       
+        # Add attention mechanism for LiDAR
+        self.lidar_attention = nn.MultiheadAttention(embed_dim=128, num_heads=8, batch_first=True)
+        
         # Enhanced TSDF processing
         self.tsdf_conv2d = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, padding=1),
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(),
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
             nn.AdaptiveAvgPool2d((1, None))
         )
 
-        # Enhanced fusion
+        # Fusion with more sophisticated combination
         self.fusion_layer = nn.Sequential(
-            nn.Conv1d(512, 512, kernel_size=5, padding=2),  # 256 + 256
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Conv1d(512, 256, kernel_size=3, padding=1),
+            nn.Conv1d(256, 256, kernel_size=3, padding=1),  # 128 + 128
             nn.BatchNorm1d(256),
             nn.ReLU(),
             nn.Conv1d(256, 128, kernel_size=3, padding=1),
@@ -509,127 +489,156 @@ class ImprovedResNetNoGating3(nn.Module):
             nn.ReLU()
         )
 
-        self.dropout_fused = nn.Dropout(p=0.1)
-       
-        # Shared feature extractor
-        self.shared_features = nn.Sequential(
-            nn.Conv1d(128, 128, kernel_size=7, padding=3),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.Conv1d(128, 64, kernel_size=5, padding=2),
+        self.dropout_fused = nn.Dropout(p=0.2)
+        
+        # Separate feature extractors for different tasks
+        self.min_feature_extractor = nn.Sequential(
+            nn.Conv1d(128, 64, kernel_size=5, padding=2),  # Larger receptive field
             nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Conv1d(64, 32, kernel_size=3, padding=1),
+            nn.BatchNorm1d(32),
             nn.ReLU()
         )
-       
-        # Task-specific heads
+        
+        self.max_feature_extractor = nn.Sequential(
+            nn.Conv1d(128, 64, kernel_size=7, padding=3),  # Even larger receptive field
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Conv1d(64, 32, kernel_size=3, padding=1),
+            nn.BatchNorm1d(32),
+            nn.ReLU()
+        )
+        
+        self.confidence_feature_extractor = nn.Sequential(
+            nn.Conv1d(128, 64, kernel_size=3, padding=1),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Conv1d(64, 32, kernel_size=3, padding=1),
+            nn.BatchNorm1d(32),
+            nn.ReLU()
+        )
+        
+        # Final prediction heads - much simpler
         self.min_heads = nn.ModuleList([
             nn.Sequential(
-                nn.Conv1d(64, 32, kernel_size=3, padding=1),
+                nn.Conv1d(32, 16, 1),
                 nn.ReLU(),
                 nn.Dropout(0.1),
-                nn.Conv1d(32, 1, 1)
+                nn.Conv1d(16, 1, 1)
             ) for _ in range(self.max_obstacles)
         ])
-       
+        
         self.max_heads = nn.ModuleList([
             nn.Sequential(
-                nn.Conv1d(64, 32, kernel_size=3, padding=1),
+                nn.Conv1d(32, 16, 1),
                 nn.ReLU(),
                 nn.Dropout(0.1),
-                nn.Conv1d(32, 1, 1)
+                nn.Conv1d(16, 1, 1)
             ) for _ in range(self.max_obstacles)
         ])
-       
+        
         self.confidence_heads = nn.ModuleList([
             nn.Sequential(
-                nn.Conv1d(64, 32, kernel_size=3, padding=1),
+                nn.Conv1d(32, 32, 3, padding=1),
+                nn.BatchNorm1d(32),
                 nn.ReLU(),
-                nn.Dropout(0.15),
-                nn.Conv1d(32, 1, 1)
+                nn.Conv1d(32, 16, 3, padding=1),
+                nn.ReLU(),
+                nn.Conv1d(16, 1, 1)
             ) for _ in range(self.max_obstacles)
         ])
-       
-        self._initialize_heads_with_diversity()
-   
-    def _initialize_heads_with_diversity(self):
-        """Initialize heads to encourage diversity"""
+
+        
+        self._initialize_heads_carefully()
+        
+    def _initialize_heads_carefully(self):
+        """More careful initialization to encourage different behaviors"""
+        
+        # Initialize min heads to prefer earlier indices
         for i, head in enumerate(self.min_heads):
             for layer in head:
                 if isinstance(layer, nn.Conv1d):
-                    nn.init.xavier_normal_(layer.weight, gain=0.8)
+                    # Custom initialization for min heads
+                    nn.init.xavier_normal_(layer.weight, gain=0.5)
                     if layer.bias is not None:
-                        nn.init.constant_(layer.bias, -0.3 - i * 0.2)
-       
+                        # Bias toward smaller indices for min heads
+                        nn.init.constant_(layer.bias, -0.2 - i * 0.1)
+        
+        # Initialize max heads to prefer later indices
         for i, head in enumerate(self.max_heads):
             for layer in head:
                 if isinstance(layer, nn.Conv1d):
-                    nn.init.xavier_normal_(layer.weight, gain=0.8)
+                    nn.init.xavier_normal_(layer.weight, gain=1.0)
                     if layer.bias is not None:
-                        nn.init.constant_(layer.bias, 0.3 + i * 0.2)
-       
-        for i, head in enumerate(self.confidence_heads):
+                        # Bias toward larger indices for max heads
+                        nn.init.constant_(layer.bias, 0.2 + i * 0.1)
+        
+        # Initialize confidence heads conservatively
+        for head in self.confidence_heads:
             for layer in head:
                 if isinstance(layer, nn.Conv1d):
-                    nn.init.xavier_normal_(layer.weight, gain=0.5)
+                    nn.init.xavier_normal_(layer.weight, gain=0.1)
                     if layer.bias is not None:
-                        nn.init.constant_(layer.bias, -2.0 + i * 0.5)  # Different starting confidences
-   
+                        nn.init.constant_(layer.bias, -1.5)  # Start conservative
+                
     def forward(self, lidar_data, tsdf_data):
         batch_size = lidar_data.shape[0]
-       
-        # Enhanced LiDAR processing
+        
+        # Process LiDAR with attention
         x_lidar = self.lidar_layer1(lidar_data)
         x_lidar = self.lidar_layer2(x_lidar)
         x_lidar = self.lidar_layer3(x_lidar)
-        x_lidar = self.lidar_layer4(x_lidar)
-       
-        # Apply attention
-        x_lidar_transposed = x_lidar.transpose(1, 2)  # (B, 360, 256)
+        
+        # Apply attention to LiDAR features
+        x_lidar_transposed = x_lidar.transpose(1, 2)  # (B, 360, 128)
         x_lidar_attended, _ = self.lidar_attention(x_lidar_transposed, x_lidar_transposed, x_lidar_transposed)
-        x_lidar = x_lidar_attended.transpose(1, 2)  # Back to (B, 256, 360)
+        x_lidar = x_lidar_attended.transpose(1, 2)  # Back to (B, 128, 360)
 
         # Process TSDF
         while tsdf_data.ndim > 4:
             tsdf_data = tsdf_data.squeeze(0)
-       
+        
         if tsdf_data.shape[-1] != 360:
-            tsdf_data = F.interpolate(tsdf_data, size=(tsdf_data.shape[2], 360),
+            tsdf_data = F.interpolate(tsdf_data, size=(tsdf_data.shape[2], 360), 
                                     mode='bilinear', align_corners=False)
 
-        tsdf_feat = self.tsdf_conv2d(tsdf_data)  # (B, 256, 1, 360)
-        tsdf_feat = tsdf_feat.squeeze(2)  # (B, 256, 360)
+        tsdf_feat = self.tsdf_conv2d(tsdf_data)  # (B, 128, 1, 360)
+        tsdf_feat = tsdf_feat.squeeze(2)  # (B, 128, 360)
 
         # Ensure same sequence length
         if tsdf_feat.shape[-1] != x_lidar.shape[-1]:
-            tsdf_feat = F.interpolate(tsdf_feat, size=x_lidar.shape[-1],
+            tsdf_feat = F.interpolate(tsdf_feat, size=x_lidar.shape[-1], 
                                     mode='linear', align_corners=False)
-       
+        
         # Fusion
-        x_fused = torch.cat([x_lidar, tsdf_feat], dim=1)  # (B, 512, 360)
+        x_fused = torch.cat([x_lidar, tsdf_feat], dim=1)  # (B, 256, 360)
         x_fused = self.fusion_layer(x_fused)  # (B, 128, 360)
         x_fused = self.dropout_fused(x_fused)
 
-        # Shared features
-        shared_features = self.shared_features(x_fused)  # (B, 64, 360)
+        # Extract task-specific features
+        min_features = self.min_feature_extractor(x_fused)  # (B, 32, 360)
+        max_features = self.max_feature_extractor(x_fused)  # (B, 32, 360)
+        conf_features = self.confidence_feature_extractor(x_fused)  # (B, 32, 360)
 
         # Generate predictions
         all_min_logits = []
         all_max_logits = []
         all_confidence = []
-       
+        
         for i in range(self.max_obstacles):
-            min_logits = self.min_heads[i](shared_features).squeeze(1)  # (B, 360)
-            max_logits = self.max_heads[i](shared_features).squeeze(1)  # (B, 360)
-            confidence = self.confidence_heads[i](shared_features).squeeze(1)  # (B, 360)
-           
+            min_logits = self.min_heads[i](min_features).squeeze(1)  # (B, 360)
+            max_logits = self.max_heads[i](max_features).squeeze(1)  # (B, 360)
+            confidence = self.confidence_heads[i](conf_features).squeeze(1)  # (B, 360)
+            
             all_min_logits.append(min_logits)
             all_max_logits.append(max_logits)
             all_confidence.append(confidence)
 
         return {
-            'min_logits': torch.stack(all_min_logits, dim=1),  # (B, 3, 360)
-            'max_logits': torch.stack(all_max_logits, dim=1),  # (B, 3, 360)
-            'confidence': torch.stack(all_confidence, dim=1)  # (B, 3, 360)
+            'min_logits': torch.stack(all_min_logits, dim=1),      # (B, 3, 360)
+            'max_logits': torch.stack(all_max_logits, dim=1),      # (B, 3, 360)
+            'confidence': torch.stack(all_confidence, dim=1)       # (B, 3, 360)
         }
     
 
@@ -726,97 +735,122 @@ resnet = ImprovedResNetNoGating3().to(device)
 
 
 def train_model():
-    model = ImprovedResNetNoGating3().to(device)
-   
-    # Use a more sophisticated optimizer setup
-    optimizer = optim.AdamW(model.parameters(), lr=0.0005, weight_decay=1e-4)
-   
-    # Warm-up + cosine annealing scheduler
-    def lr_lambda(epoch):
-        if epoch < 5:  # Warm-up
-            return (epoch + 1) / 5
-        else:  # Cosine annealing
-            return 0.5 * (1 + math.cos(math.pi * (epoch - 5) / (num_epochs - 5)))
-   
-    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-   
+    optimizer = optim.AdamW(resnet.parameters(), lr=0.0001, weight_decay=1e-3)  
+    
+    # CRITICAL: More gradual learning rate decay
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.7, patience=3
+    )
+    
     loss_history = []
-    loss_components = {'position_loss': [], 'confidence_loss': [],
-                      'diversity_loss': [], 'completeness_loss': []}
-   
+    loss_components = {'position_loss': [], 'confidence_loss': []}
+    
+    # Add gradient checking
+    def check_gradients():
+        total_norm = 0
+        param_count = 0
+        for name, param in resnet.named_parameters():
+            if param.grad is not None:
+                param_norm = param.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+                param_count += 1
+            else:
+                print(f"WARNING: No gradient for {name}")
+        return (total_norm ** 0.5) / max(param_count, 1)
+    
     for epoch in range(num_epochs):
-        model.train()
+        resnet.train()
         epoch_loss = 0.0
-        epoch_components = {key: 0.0 for key in loss_components.keys()}
+        epoch_components = {'position_loss': 0.0, 'confidence_loss': 0.0}
         batch_count = 0
-       
+        
         for batch_idx, (distances, labels, _, tsdf) in enumerate(train_loader):
             distances = distances.to(device)
             tsdf = tsdf.to(device)
-           
+            
+            # Generate targets
             obstacle_targets = generate_multi_obstacle_targets(labels)
-           
-            # Skip batches with no obstacles during early training
-            if epoch < 5 and not any(len(targets) > 0 for targets in obstacle_targets):
+            
+            # CRITICAL: Check for empty targets
+            if not any(len(targets) > 0 for targets in obstacle_targets):
+                print(f"WARNING: Batch {batch_idx} has no obstacles, skipping")
                 continue
 
             optimizer.zero_grad()
-           
-            predictions = model(distances, tsdf)
-           
-            # Use the enhanced loss function
-            loss, components = improved_multi_obstacle_loss_with_constraints(
-                predictions, obstacle_targets,
-                alpha=1.0, confidence_weight=0.6, diversity_weight=0.15,
-                empty_slot_penalty=0.1
-            )
-           
+            
+            # Forward pass
+            predictions = resnet(distances, tsdf)
+            
+            # CRITICAL: Add prediction debugging
+            if batch_idx == 0 and epoch % 2 == 0:
+                min_preds = torch.argmax(predictions['min_logits'][0], dim=-1)
+                max_preds = torch.argmax(predictions['max_logits'][0], dim=-1)
+                conf_preds = torch.sigmoid(predictions['confidence'][0])
+                print(f"Epoch {epoch}, Sample 0 predictions:")
+                print(f"  Min: {min_preds.cpu().numpy()}")
+                print(f"  Max: {max_preds.cpu().numpy()}")
+                print(f"  Conf: {conf_preds.mean(dim=-1).detach().cpu().numpy()}")
+                print(f"  Ground truth: {obstacle_targets[0]}")
+
+            # Loss computation with the fixed function
+            loss, components = improved_multi_obstacle_loss_with_constraints(predictions, obstacle_targets)
+            
+            # CRITICAL: Check for NaN loss
             if torch.isnan(loss):
-                print(f"NaN loss at epoch {epoch}, batch {batch_idx}")
+                print(f"NaN loss detected at epoch {epoch}, batch {batch_idx}")
                 continue
-           
+                
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            # Check gradients
+            grad_norm = check_gradients()
+            if grad_norm > 10.0:  # Gradient explosion check
+                print(f"Large gradient norm: {grad_norm:.4f}")
+            
+            # CRITICAL: Gradient clipping
+            torch.nn.utils.clip_grad_norm_(resnet.parameters(), max_norm=1.0)
             optimizer.step()
-           
+            
             epoch_loss += loss.item()
             for key in epoch_components:
                 if key in components:
                     epoch_components[key] += components[key]
             batch_count += 1
-           
-            if batch_idx % 20 == 0:
+            
+            if batch_idx % 10 == 0:
                 print(f'Epoch [{epoch+1}/{num_epochs}], Step [{batch_idx+1}/{len(train_loader)}], '
-                      f'Loss: {loss.item():.4f}')
-       
-        scheduler.step()
-       
+                      f'Loss: {loss.item():.4f}, Grad norm: {grad_norm:.4f}')
+        
         if batch_count == 0:
+            print(f"WARNING: No valid batches in epoch {epoch}")
             continue
-       
+            
         avg_epoch_loss = epoch_loss / batch_count
+        scheduler.step(avg_epoch_loss)  # Use loss for scheduling
         loss_history.append(avg_epoch_loss)
-       
+        
         for key in epoch_components:
             loss_components[key].append(epoch_components[key] / batch_count)
-       
+        
         print(f'Epoch [{epoch+1}/{num_epochs}] Average Loss: {avg_epoch_loss:.4f}')
-        print(f' Position: {epoch_components["position_loss"]/batch_count:.4f}, '
-              f'Confidence: {epoch_components["confidence_loss"]/batch_count:.4f}, '
-              f'Diversity: {epoch_components["diversity_loss"]/batch_count:.4f}, '
-              f'Completeness: {epoch_components["completeness_loss"]/batch_count:.4f}')
-   
-    return model, loss_history, loss_components
+        print(f'  Position Loss: {epoch_components["position_loss"]/batch_count:.4f}')
+        print(f'  Confidence Loss: {epoch_components["confidence_loss"]/batch_count:.4f}')
+        
+        # Early stopping check
+        if len(loss_history) > 10:
+            recent_losses = loss_history[-10:]
+            if max(recent_losses) - min(recent_losses) < 0.001:
+                print("Loss plateaued, stopping early")
+                break
+    
+    return loss_history, loss_components
 
-def improved_post_processing(predictions, confidence_threshold=0.3,
-                           min_obstacle_width=1, max_obstacle_width=200,
-                           num_expected_obstacles=3):
+def improved_post_processing(predictions, num_expected_obstacles=3):
     """
-    More sophisticated post-processing that better handles multiple obstacles
+    Post-processing that ignores confidence and relies only on min/max logits.
     """
     min_pred_logits = predictions['min_logits']  # (B, num_slots, 360)
     max_pred_logits = predictions['max_logits']  # (B, num_slots, 360)
-    confidence_logits = predictions['confidence']  # (B, num_slots, 360)
 
     batch_size = min_pred_logits.shape[0]
     num_slots = min_pred_logits.shape[1]
@@ -824,119 +858,71 @@ def improved_post_processing(predictions, confidence_threshold=0.3,
     batch_results = []
 
     for b in range(batch_size):
-        confidence_probs = torch.sigmoid(confidence_logits[b]).detach().cpu().numpy()  # (num_slots, 360)
         min_probs = torch.softmax(min_pred_logits[b], dim=-1).detach().cpu().numpy()  # (num_slots, 360)
         max_probs = torch.softmax(max_pred_logits[b], dim=-1).detach().cpu().numpy()
 
         obstacle_candidates = []
 
         for slot_idx in range(num_slots):
-            # Check if this slot is confident about detecting an obstacle
-            max_confidence = np.max(confidence_probs[slot_idx])
-            avg_confidence = np.mean(confidence_probs[slot_idx])
-           
-            if max_confidence < confidence_threshold and avg_confidence < confidence_threshold * 0.5:
-                continue  # Skip slots with low confidence
+            # Get most confident min and max locations
+            best_min_idx = np.argmax(min_probs[slot_idx])
+            best_max_idx = np.argmax(max_probs[slot_idx])
 
-            # Find confident regions
-            confident_indices = np.where(confidence_probs[slot_idx] > confidence_threshold)[0]
-           
-            if len(confident_indices) < min_obstacle_width:
-                continue
-
-            # Find the best min/max within confident regions
-            # Weight the probabilities by confidence
-            weighted_min_probs = min_probs[slot_idx] * confidence_probs[slot_idx]
-            weighted_max_probs = max_probs[slot_idx] * confidence_probs[slot_idx]
-
-            best_min_idx = np.argmax(weighted_min_probs)
-            best_max_idx = np.argmax(weighted_max_probs)
-
-            # Ensure reasonable span
+            # Ensure reasonable ordering
             if best_min_idx == best_max_idx:
-                # Expand around the point
-                best_min_idx = (best_min_idx - 2) % 360
-                best_max_idx = (best_max_idx + 2) % 360
+                best_min_idx = (best_min_idx - 3) % 360
+                best_max_idx = (best_max_idx + 3) % 360
 
-            # Calculate span width
             if best_min_idx <= best_max_idx:
                 span_width = best_max_idx - best_min_idx + 1
             else:
                 span_width = (360 - best_min_idx) + (best_max_idx + 1)
 
-            # Filter by reasonable span width
-            if span_width < min_obstacle_width or span_width > max_obstacle_width:
+            # Skip unreasonable spans
+            if span_width < 1 or span_width > 200:
                 continue
 
-            # Calculate combined score
-            min_confidence_at_pred = confidence_probs[slot_idx, best_min_idx]
-            max_confidence_at_pred = confidence_probs[slot_idx, best_max_idx]
-            position_certainty = (min_probs[slot_idx, best_min_idx] + max_probs[slot_idx, best_max_idx]) / 2
-           
-            combined_score = (min_confidence_at_pred + max_confidence_at_pred + position_certainty) / 3
+            # Use combined certainty as confidence surrogate (sum of max logits at predicted points)
+            min_score = min_probs[slot_idx, best_min_idx]
+            max_score = max_probs[slot_idx, best_max_idx]
+            combined_score = (min_score + max_score) / 2.0
 
             obstacle_candidates.append({
                 'min_idx': best_min_idx,
                 'max_idx': best_max_idx,
                 'score': combined_score,
                 'span_width': span_width,
-                'slot': slot_idx,
-                'avg_confidence': avg_confidence
+                'slot': slot_idx
             })
 
-        # Sort by score (higher is better)
+        # Sort by score
         obstacle_candidates.sort(key=lambda x: x['score'], reverse=True)
 
-        # Select non-overlapping obstacles using a more sophisticated method
+        # Select top non-overlapping candidates
         selected_obstacles = []
-        used_regions = []
+        used_indices = set()
 
         for candidate in obstacle_candidates:
-            # Create the span
             if candidate['min_idx'] <= candidate['max_idx']:
-                candidate_span = set(range(candidate['min_idx'], candidate['max_idx'] + 1))
+                span_indices = set(range(candidate['min_idx'], candidate['max_idx'] + 1))
             else:
-                candidate_span = set(range(candidate['min_idx'], 360)) | set(range(0, candidate['max_idx'] + 1))
+                span_indices = set(range(candidate['min_idx'], 360)) | set(range(0, candidate['max_idx'] + 1))
 
-            # Check overlap with existing selections
-            overlap_detected = False
-            for existing_span in used_regions:
-                overlap = len(candidate_span & existing_span)
-                overlap_ratio = overlap / len(candidate_span)
-               
-                # Allow small overlaps but not major ones
-                if overlap_ratio > 0.3:  # More than 30% overlap
-                    overlap_detected = True
-                    break
-
-            if not overlap_detected:
+            overlap = len(span_indices & used_indices)
+            if overlap <= 0:
                 selected_obstacles.append((candidate['min_idx'], candidate['max_idx']))
-                used_regions.append(candidate_span)
+                used_indices.update(span_indices)
 
-                if len(selected_obstacles) >= num_expected_obstacles:
-                    break
+            if len(selected_obstacles) >= num_expected_obstacles:
+                break
 
-        # If we didn't find enough obstacles, add the best remaining candidates
-        # This ensures we always return the expected number
-        remaining_candidates = [c for c in obstacle_candidates
-                              if (c['min_idx'], c['max_idx']) not in selected_obstacles]
-       
-        while len(selected_obstacles) < num_expected_obstacles and remaining_candidates:
-            best_remaining = remaining_candidates.pop(0)
-            selected_obstacles.append((best_remaining['min_idx'], best_remaining['max_idx']))
-
-        # Final fallback - add dummy obstacles if still not enough
+        # Fallback: if not enough found
         while len(selected_obstacles) < num_expected_obstacles:
-            # Place dummy obstacles in unused space
-            dummy_start = (len(selected_obstacles) * 60) % 360
-            dummy_end = (dummy_start + 10) % 360
-            selected_obstacles.append((dummy_start, dummy_end))
+            selected_obstacles.append((0, 10))  # dummy span
 
         batch_results.append(selected_obstacles)
 
     return batch_results
-
-
 
 def test_single_scan(distances, tsdf, num_expected_obstacles=3):
     """
@@ -1088,7 +1074,7 @@ def test_model_with_improved_processing_single(dataloader, num_expected_obstacle
         all_predictions (List[List[Tuple[int, int]]]): List of predicted spans for each sample
     """
     test_resnet = ImprovedResNetNoGating3().to(device)
-    model_path = os.path.join(data_dir, "diverse_resnet_better.pth")
+    model_path = os.path.join(data_dir, "diverse_resnet_3_better.pth")
     test_resnet.load_state_dict(torch.load(model_path))
     test_resnet.eval()
     all_predictions = []
@@ -1127,7 +1113,7 @@ def test_model_with_improved_processing_multi(dataloader, num_expected_obstacles
     """
     test_resnet = ImprovedResNetNoGating3().to(device)
     if model_path is None:
-        model_path = os.path.join(data_dir, "diverse_resnet_better.pth")
+        model_path = os.path.join(data_dir, "diverse_resnet_3_better.pth")
     test_resnet.load_state_dict(torch.load(model_path, map_location=device))
     test_resnet.eval()
     all_predictions = []
@@ -1168,7 +1154,7 @@ inspect_dataset_constructor()
 
 if __name__ == "__main__":
     # train_model_few_batches()
-    model, loss_history, loss_components = train_model()
+    loss_history, loss_components = train_model()
     obstacle_accuracy, avg_error = test_model_with_improved_processing(loss_history, loss_components)
     # sample_lidar = testing_lidar[200]  # Use the first sample for testing
     # sample_tsdf = lidar_to_tsdf_obstacles(np.expand_dims(sample_lidar, axis=0))  # Get corresponding TSDF
@@ -1191,7 +1177,7 @@ if __name__ == "__main__":
     # print("Actual obstacle spans:")
     # print(actual_obstacle_spans)
 
-    model_path = os.path.join(data_dir, "diverse_resnet_better.pth")
+    model_path = os.path.join(data_dir, "diverse_resnet_3_better.pth")
     torch.save(resnet.state_dict(), model_path)
     print(f'Model saved to {model_path}')
 
