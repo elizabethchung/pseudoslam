@@ -48,7 +48,7 @@ def visualize_input_sample(lidar_data, tsdf_data, label, pred, mask=None):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
-num_epochs = 20
+num_epochs = 40
 batch_size = 32
 learning_rate = 0.00005
 torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner for faster training
