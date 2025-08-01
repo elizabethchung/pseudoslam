@@ -48,7 +48,7 @@ def visualize_input_sample(lidar_data, tsdf_data, label, pred, mask=None):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
-num_epochs = 20
+num_epochs = 1
 batch_size = 32
 learning_rate = 0.00005
 torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner for faster training
@@ -589,6 +589,7 @@ class ImprovedResNetNoGating3(nn.Module):
         x_lidar = self.lidar_layer1(lidar_data)
         x_lidar = self.lidar_layer2(x_lidar)
         x_lidar = self.lidar_layer3(x_lidar)
+        x_lidar = self.lidar_layer4(x_lidar)  # (B, 128, 360)
         
         # Apply attention to LiDAR features
         x_lidar_transposed = x_lidar.transpose(1, 2)  # (B, 360, 128)
