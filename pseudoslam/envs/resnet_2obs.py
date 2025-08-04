@@ -1242,9 +1242,8 @@ def test_model_with_improved_processing(loss_history, loss_components):
 
     plt.tight_layout()
     # Save the figure
-    fig_path = os.path.join("/home/roboticslab/pseudoslam/pseudoslam/figures", "training_loss_improved.png")
-    plt.savefig(fig_path)
-    print(f"Training loss figure saved to {fig_path}")
+    plt.savefig('training_loss_2_obstacles.png')
+    print(f"Training loss figure saved to training_loss_2_obstacles.png")
     plt.show()
 
     return obstacle_accuracy, avg_error
