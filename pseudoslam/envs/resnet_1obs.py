@@ -952,12 +952,12 @@ def test_model_with_improved_processing(loss_history, loss_components, val_loss_
 
     plt.subplot(2, 4, 1)
     plt.plot(range(num_epochs), loss_history, label='Training Loss')
-    if val_loss_history is not None:
-        plt.plot(range(num_epochs), val_loss_history, label='Validation Loss')
+    # if val_loss_history is not None:
+    #     plt.plot(range(num_epochs), val_loss_history, label='Validation Loss')
     # Title the graph
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
-    plt.title('1 Obstacle Training and Validation Loss')
+    plt.title('1 Obstacle Training Loss')
     plt.legend()
 
     plt.subplot(2, 4, 2)
@@ -991,8 +991,8 @@ def test_model_with_improved_processing(loss_history, loss_components, val_loss_
 
     plt.tight_layout()
     plt.show()
-    plt.savefig("loss_components.png")
-    print("Saved plot to loss_components.png")
+    plt.savefig("1_obs_training_loss.png")
+    print(f"Saved plot to 1_obs_training_loss.png")
 
 
     return obstacle_accuracy, avg_error
