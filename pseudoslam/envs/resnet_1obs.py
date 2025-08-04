@@ -991,6 +991,9 @@ def test_model_with_improved_processing(loss_history, loss_components, val_loss_
 
     plt.tight_layout()
     plt.show()
+    plt.savefig("loss_components.png")
+    print("Saved plot to loss_components.png")
+
 
     return obstacle_accuracy, avg_error
 
