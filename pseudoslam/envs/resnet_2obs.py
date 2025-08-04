@@ -237,90 +237,6 @@ def extract_min_max_from_targets(batch_targets, device):
         torch.tensor(max_indices, device=device, dtype=torch.long),
     )
 
-# def improved_multi_obstacle_loss(predictions, obstacle_targets,
-#                                 alpha=0.5,
-#                                 confidence_weight=1.0):
-#     """
-#     Fixed loss function with proper gradient flow
-#     """
-    
-#     min_pred_logits = predictions['min_logits']  # (B, 3, 360)
-#     max_pred_logits = predictions['max_logits']  # (B, 3, 360)
-#     confidence_logits = predictions['confidence']  # (B, 3, 360)
-    
-#     batch_size = min_pred_logits.shape[0]
-#     max_obstacles = min_pred_logits.shape[1]
-    
-#     total_position_loss = 0.0
-#     total_confidence_loss = 0.0
-#     valid_samples = 0
-    
-#     for batch_idx in range(batch_size):
-#         obstacle_regions = obstacle_targets[batch_idx]
-#         num_obstacles = len(obstacle_regions) if obstacle_regions else 0
-        
-#         # Process each obstacle slot
-#         for slot_idx in range(max_obstacles):
-#             if slot_idx < num_obstacles:
-#                 region = obstacle_regions[slot_idx]
-                
-#                 # Ensure valid indices
-#                 min_class = max(0, min(region[0], 359))
-#                 max_class = max(0, min(region[1], 359))
-                
-#                 # Position loss - FIXED: Proper tensor creation
-#                 min_target = torch.tensor(min_class, dtype=torch.long, device=min_pred_logits.device)
-#                 max_target = torch.tensor(max_class, dtype=torch.long, device=max_pred_logits.device)
-                
-#                 # Cross entropy loss
-#                 ce_min = F.cross_entropy(min_pred_logits[batch_idx, slot_idx:slot_idx+1], 
-#                                        min_target.unsqueeze(0))
-#                 ce_max = F.cross_entropy(max_pred_logits[batch_idx, slot_idx:slot_idx+1], 
-#                                        max_target.unsqueeze(0))
-                
-#                 total_position_loss += ce_min + ce_max
-                
-#                 # Confidence targets - FIXED: No in-place operations
-#                 confidence_target = torch.zeros_like(confidence_logits[batch_idx, slot_idx])
-                
-#                 if min_class <= max_class:
-#                     confidence_target[min_class:max_class + 1] = 1.0
-#                 else:
-#                     # Handle wrap-around
-#                     confidence_target[min_class:] = 1.0
-#                     confidence_target[:max_class + 1] = 1.0
-                
-#                 # Confidence loss
-#                 conf_loss = F.binary_cross_entropy_with_logits(
-#                     confidence_logits[batch_idx, slot_idx], 
-#                     confidence_target
-#                 )
-#                 total_confidence_loss += conf_loss
-#                 valid_samples += 1
-#             else:
-#                 # No obstacle - confidence should be low
-#                 conf_loss = F.binary_cross_entropy_with_logits(
-#                     confidence_logits[batch_idx, slot_idx],
-#                     torch.zeros_like(confidence_logits[batch_idx, slot_idx])
-#                 )
-#                 total_confidence_loss += conf_loss
-#                 valid_samples += 1
-    
-#     # Normalize losses
-#     if valid_samples > 0:
-#         avg_position_loss = total_position_loss / valid_samples
-#         avg_confidence_loss = total_confidence_loss / valid_samples
-#     else:
-#         avg_position_loss = torch.tensor(0.0, device=min_pred_logits.device)
-#         avg_confidence_loss = torch.tensor(0.0, device=min_pred_logits.device)
-    
-#     total_loss = alpha * avg_position_loss + confidence_weight * avg_confidence_loss
-    
-#     return total_loss, {
-#         'position_loss': avg_position_loss.item(),
-#         'confidence_loss': avg_confidence_loss.item()
-#     }
-
 def improved_multi_obstacle_loss_with_constraints(predictions, obstacle_targets,
                                                 alpha=0.5,
                                                 confidence_weight=1.0,
@@ -1533,143 +1449,29 @@ inspect_dataset_constructor()
 
 if __name__ == "__main__":
     # train_model_few_batches()
-    # loss_history, loss_components = train_model()
-    # obstacle_accuracy, avg_error = test_model_with_improved_processing(loss_history, loss_components)
-    sample_lidar = testing_lidar[200]  # Use the first sample for testing
-    sample_tsdf = lidar_to_tsdf_obstacles(np.expand_dims(sample_lidar, axis=0))  # Get corresponding TSDF
+    loss_history, loss_components = train_model()
+    obstacle_accuracy, avg_error = test_model_with_improved_processing(loss_history, loss_components)
+    # sample_lidar = testing_lidar[200]  # Use the first sample for testing
+    # sample_tsdf = lidar_to_tsdf_obstacles(np.expand_dims(sample_lidar, axis=0))  # Get corresponding TSDF
     # Generate dummy labels (all 0s)
-    dummy_labels = np.zeros((1, 360), dtype=np.float32)  # shape: (1, 360)
-    # dummy_labels = np.expand_dims(labels_test[200], axis=0)  # shape: (1, 360)
-    actual_obstacle_spans = generate_multi_obstacle_targets(np.expand_dims(labels_test[200], axis=0))  # Get ground truth
-    single_test = LidarTSDFDataset(
-        np.expand_dims(sample_lidar, axis=0), 
-        dummy_labels,  # Dummy labels
-        np.expand_dims(testing_mask[200], axis=0),
-        tsdf_cache_path=None)
+    # dummy_labels = np.zeros((1, 360), dtype=np.float32)  # shape: (1, 360)
+    # # dummy_labels = np.expand_dims(labels_test[200], axis=0)  # shape: (1, 360)
+    # actual_obstacle_spans = generate_multi_obstacle_targets(np.expand_dims(labels_test[200], axis=0))  # Get ground truth
+    # single_test = LidarTSDFDataset(
+    #     np.expand_dims(sample_lidar, axis=0), 
+    #     dummy_labels,  # Dummy labels
+    #     np.expand_dims(testing_mask[200], axis=0),
+    #     tsdf_cache_path=None)
 
-    single_test = DataLoader(single_test, batch_size=1, shuffle=False, pin_memory=True, num_workers=4)
+    # single_test = DataLoader(single_test, batch_size=1, shuffle=False, pin_memory=True, num_workers=4)
 
-    predicted_spans = test_model_with_improved_processing_single(single_test)
+    # predicted_spans = test_model_with_improved_processing_single(single_test)
 
-    print("Predicted obstacle spans:")
-    print(predicted_spans)
-    print("Actual obstacle spans:")
-    print(actual_obstacle_spans)
+    # print("Predicted obstacle spans:")
+    # print(predicted_spans)
+    # print("Actual obstacle spans:")
+    # print(actual_obstacle_spans)
 
     model_path = os.path.join(data_dir, "resnet_2obs.pth")
     torch.save(resnet.state_dict(), model_path)
     print(f'Model saved to {model_path}')
-
-# print("Running dummy training...")
-
-
-# class DummyTwoObstacleDataset(Dataset):
-#     def __init__(self, num_samples=100):
-#         self.num_samples = num_samples
-
-#     def __len__(self):
-#         return self.num_samples
-
-#     def __getitem__(self, idx):
-#         distances = torch.zeros(1, 360)
-#         tsdf = torch.rand(3, 64, 360)
-
-#         # Random obstacle angular ranges within [0, 360)
-#         angle1_min = torch.randint(0, 100, (1,)).item()
-#         angle1_max = angle1_min + torch.randint(10, 30, (1,)).item()
-
-#         angle2_min = torch.randint(150, 250, (1,)).item()
-#         angle2_max = angle2_min + torch.randint(10, 30, (1,)).item()
-
-#         # Clamp to 359 max
-#         label = torch.tensor([[angle1_min, min(angle1_max, 359)],
-#                               [angle2_min, min(angle2_max, 359)]])
-#         return distances, label, 2, tsdf
-
-
-# # Init dataloader
-# dummy_loader = DataLoader(DummyTwoObstacleDataset(), batch_size=16, shuffle=True)
-
-# # Move model to device
-# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# resnet = resnet.to(device)
-
-# # Define optimizer
-# optimizer = torch.optim.Adam(resnet.parameters(), lr=1e-3)
-
-# # === Training loop ===
-# resnet.train()
-# for epoch in range(10):
-#     total_loss = 0
-#     for distances, labels, _, tsdf in dummy_loader:
-#         distances = distances.to(device)
-#         tsdf = tsdf.to(device)
-#         labels = labels.to(device)
-
-#         # Forward pass
-#         outputs = resnet(distances, tsdf)  # (B, 2, 360)
-#         print("min_logits max value:", outputs["min_logits"].max().item())
-#         print("min_logits min value:", outputs["min_logits"].min().item())
-#         print("max_logits max value:", outputs["max_logits"].max().item())
-#         print("max_logits min value:", outputs["max_logits"].min().item())
-
-#         min_logits = outputs['min_logits']  # (B, 2, 360)
-#         max_logits = outputs['max_logits']  # (B, 2, 360)
-
-
-#         # Compute CE loss on both predicted angular endpoints
-#         ce_loss = 0.0
-#         for i in range(2):  # loop over 2 obstacles
-#             min_target = labels[:, i, 0]  # shape: (B,)
-#             max_target = labels[:, i, 1]  # shape: (B,)
-#             print("Min target sample:", min_target[0])  # Should be integer like 30, not 30.2
-#             print("Max target sample:", max_target[0])
-#             print(min_target.shape, min_target.dtype, min_target.min(), min_target.max())
-#             print(max_target.shape, max_target.dtype, max_target.min(), max_target.max())
-#             ce_min = F.cross_entropy(min_logits[:, i, :], min_target)
-#             ce_max = F.cross_entropy(max_logits[:, i, :], max_target)
-#             ce_loss += ce_min + ce_max
-
-#         ce_loss /= 2.0
-
-#         # Backprop
-#         optimizer.zero_grad()
-#         ce_loss.backward()
-#         optimizer.step()
-
-#         total_loss += ce_loss.item()
-
-#     print(f"Epoch {epoch+1}, Avg Loss: {total_loss / len(dummy_loader):.4f}")
-
-# def test_dummy_batch(model, dataloader, device):
-#     model.eval()
-#     with torch.no_grad():
-#         for distances, labels, _, tsdf in dataloader:
-#             distances = distances.to(device)
-#             tsdf = tsdf.to(device)
-#             labels = labels.to(device)
-
-#             outputs = model(distances, tsdf)
-#             min_logits = outputs["min_logits"]   # (B, 2, 360)
-#             max_logits = outputs["max_logits"]   # (B, 2, 360)
-#             confidence = outputs.get("confidence", None)  # optional
-
-
-#             print(min_logits[0, 0, :].detach().cpu().numpy())
-#             print(max_logits[0, 0, :].detach().cpu().numpy())
-
-
-#             # Predicted angular positions (argmax over 360 angles)
-#             pred_min = min_logits.argmax(dim=-1)  # (B, 2)
-#             pred_max = max_logits.argmax(dim=-1)  # (B, 2)
-
-#             print(f"Batch size: {distances.size(0)}")
-#             for i in range(pred_min.size(0)):  # for each example in batch
-#                 print(f"Sample {i+1}:")
-#                 for obs in range(labels.size(1)):
-#                     print(f"  Obstacle {obs+1}: Pred min = {pred_min[i, obs].item()}, Pred max = {pred_max[i, obs].item()}")
-#                     print(f"               True min = {labels[i, obs, 0].item()}, True max = {labels[i, obs, 1].item()}")
-#             break  # only one batch
-
-# # Usage
-# test_dummy_batch(resnet, dummy_loader, device)
