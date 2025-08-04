@@ -48,7 +48,7 @@ def visualize_input_sample(lidar_data, tsdf_data, label, pred, mask=None):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
-num_epochs = 20
+num_epochs = 1
 batch_size = 32
 learning_rate = 0.0001
 torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner for faster training
@@ -1292,7 +1292,7 @@ def test_model_with_improved_processing(loss_history, loss_components):
 
     plt.subplot(2, 3, 1)
     plt.plot(range(num_epochs), loss_history, label='Total Loss')
-    plt.xlabel('Epochs'); plt.ylabel('Loss'); plt.title('Training Loss'); plt.legend()
+    plt.xlabel('Epochs'); plt.ylabel('Loss'); plt.title('2 Obstacle Training Loss'); plt.legend()
 
     plt.subplot(2, 3, 2)
     for key in ['position_loss', 'confidence_loss', 'span_constraint_loss', 'diversity_loss']:
@@ -1326,6 +1326,10 @@ def test_model_with_improved_processing(loss_history, loss_components):
 
     plt.tight_layout()
     plt.show()
+    # Save the figure
+    fig_path = os.path.join(data_dir, "training_loss_improved.png")
+    plt.savefig(fig_path)
+    print(f"Training loss figure saved to {fig_path}")
 
     return obstacle_accuracy, avg_error
 
@@ -1511,35 +1515,6 @@ def test_model_with_improved_processing_single(dataloader, num_expected_obstacle
 
 #     return obstacle_accuracy, avg_error
 
-
-def train_model_few_batches(num_epochs=20, num_batches=10):
-    resnet.train()
-    optimizer = optim.Adam(resnet.parameters(), lr=0.0005, weight_decay=1e-4)
-
-    for epoch in range(num_epochs):
-        batch_loss = 0.0
-        for batch_idx, (distances, labels, _, tsdf) in enumerate(train_loader):
-            if batch_idx >= num_batches:
-                break
-
-            distances = distances.to(device)
-            tsdf = tsdf.to(device)
-
-            # Hardcoded 2-obstacle label generation (modify this if needed)
-            obstacle_targets = generate_multi_obstacle_targets(labels)  # Make sure this returns 2 per sample
-
-            optimizer.zero_grad()
-            predictions = resnet(distances, tsdf)
-            loss, _ = improved_multi_obstacle_loss(predictions, obstacle_targets)
-
-            loss.backward()
-            optimizer.step()
-
-            batch_loss += loss.item()
-
-        print(f"Epoch [{epoch+1}/{num_epochs}], Avg Loss: {batch_loss / num_batches:.4f}")
-
-    return
 
 def inspect_dataset_constructor():
     """
