@@ -1,4 +1,3 @@
-from pseudoslam.envs.resnet_gated import multi_obstacle_loss
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
@@ -8,7 +7,6 @@ import os
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
-from model_testing import test_model_with_gating_loader, test_model_with_gating_single_sample
 import math
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
