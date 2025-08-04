@@ -1241,11 +1241,11 @@ def test_model_with_improved_processing(loss_history, loss_components):
     plt.axis('off')
 
     plt.tight_layout()
-    plt.show()
     # Save the figure
     fig_path = os.path.join(data_dir, "training_loss_improved.png")
     plt.savefig(fig_path)
     print(f"Training loss figure saved to {fig_path}")
+    plt.show()
 
     return obstacle_accuracy, avg_error
 
