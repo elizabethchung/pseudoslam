@@ -48,7 +48,7 @@ def visualize_input_sample(lidar_data, tsdf_data, label, pred, mask=None):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
-num_epochs = 50
+num_epochs = 150
 batch_size = 64
 learning_rate = 0.00005
 torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner for faster training
@@ -430,20 +430,20 @@ class LidarTSDFDataset(Dataset):
                 self.mask = self.mask[:min_len]
 
         # === TSDF Caching ===
-        # if tsdf_cache_path and os.path.exists(tsdf_cache_path):
-        #     print(f"Loading TSDF from {tsdf_cache_path}")
-        #     self.tsdf_maps = np.load(tsdf_cache_path)
-        # else:
-        #     print("Computing TSDF maps...")
-        #     self.tsdf_maps = lidar_to_tsdf_obstacles(self.data)
-        #     if tsdf_cache_path:
-        #         np.save(tsdf_cache_path, self.tsdf_maps)
-        #         print(f"Saved TSDF maps to {tsdf_cache_path}")
-        print("Computing TSDF maps...")
-        self.tsdf_maps = lidar_to_tsdf_obstacles(self.data)
-        if tsdf_cache_path:
-            np.save(tsdf_cache_path, self.tsdf_maps)
-            print(f"Saved TSDF maps to {tsdf_cache_path}")
+        if tsdf_cache_path and os.path.exists(tsdf_cache_path):
+            print(f"Loading TSDF from {tsdf_cache_path}")
+            self.tsdf_maps = np.load(tsdf_cache_path)
+        else:
+            print("Computing TSDF maps...")
+            self.tsdf_maps = lidar_to_tsdf_obstacles(self.data)
+            if tsdf_cache_path:
+                np.save(tsdf_cache_path, self.tsdf_maps)
+                print(f"Saved TSDF maps to {tsdf_cache_path}")
+        # print("Computing TSDF maps...")
+        # self.tsdf_maps = lidar_to_tsdf_obstacles(self.data)
+        # if tsdf_cache_path:
+        #     np.save(tsdf_cache_path, self.tsdf_maps)
+        #     print(f"Saved TSDF maps to {tsdf_cache_path}")
 
     def __len__(self):
         return len(self.data)
@@ -1050,7 +1050,7 @@ def test_model_with_improved_processing(loss_history, loss_components):
 
     plt.subplot(2, 3, 1)
     plt.plot(range(num_epochs), loss_history, label='Total Loss')
-    plt.xlabel('Epochs'); plt.ylabel('Loss'); plt.title('Training Loss'); plt.legend()
+    plt.xlabel('Epochs'); plt.ylabel('Loss'); plt.title('3 Obstacle Training Loss'); plt.legend()
 
     plt.subplot(2, 3, 2)
     for key, values in loss_components.items():

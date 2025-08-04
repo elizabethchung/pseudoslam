@@ -1051,9 +1051,9 @@ def test_model_with_improved_processing(loss_history, val_loss_history, loss_com
 
     plt.subplot(2, 3, 1)
     plt.plot(range(num_epochs), loss_history, label='Total Loss')
-    if val_loss_history is not None:
-        plt.plot(range(num_epochs), val_loss_history, label='Validation Loss')
-    plt.xlabel('Epochs'); plt.ylabel('Loss'); plt.title('3 Obstacle Training and Validation Loss History'); plt.legend()
+    # if val_loss_history is not None:
+    #     plt.plot(range(num_epochs), val_loss_history, label='Validation Loss')
+    plt.xlabel('Epochs'); plt.ylabel('Loss'); plt.title('3 Obstacle Training Loss (Generalized)'); plt.legend()
 
     plt.subplot(2, 3, 2)
     for key, values in loss_components.items():
