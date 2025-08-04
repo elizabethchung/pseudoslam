@@ -27,7 +27,7 @@ def print_sample_data(lidar_data, label, index=0):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
-num_epochs = 35
+num_epochs = 150
 batch_size = 64
 learning_rate = 0.0001
 torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner for faster training
@@ -954,9 +954,10 @@ def test_model_with_improved_processing(loss_history, loss_components, val_loss_
     plt.plot(range(num_epochs), loss_history, label='Training Loss')
     if val_loss_history is not None:
         plt.plot(range(num_epochs), val_loss_history, label='Validation Loss')
+    # Title the graph
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
-    plt.title('Training and Validation Loss')
+    plt.title('1 Obstacle Training and Validation Loss')
     plt.legend()
 
     plt.subplot(2, 4, 2)
@@ -1009,7 +1010,7 @@ def test_model_with_improved_processing_single(dataloader, num_expected_obstacle
         all_predictions (List[List[Tuple[int, int]]]): List of predicted spans for each sample
     """
     test_resnet = ImprovedResNetNoGating1().to(device)
-    model_path = os.path.join(data_dir, "resnet_1.pth")
+    model_path = os.path.join(data_dir, "resnet_1obstest.pth")
     test_resnet.load_state_dict(torch.load(model_path))
     test_resnet.eval()
     all_predictions = []
@@ -1074,7 +1075,7 @@ if __name__ == "__main__":
     # print("Actual obstacle spans:")
     # print(actual_obstacle_spans)
 
-    model_path = os.path.join(data_dir, "resnet_1.pth")
+    model_path = os.path.join(data_dir, "resnet_1obstest.pth")
     torch.save(resnet.state_dict(), model_path)
     print(f'Model saved to {model_path}')
 
