@@ -90,7 +90,7 @@ class pseudoSlam():
         """ obstacle param """
         self.obs_num= config["obstacle"]["number"] # number of obstacle added to the world
         # size of obstacle added in the form of [min;max] in pixel
-        self.obs_sizeRange= np.zeros((2,1))
+        self.obs_sizeRange= np.zeros(2)  # 1-D so int(self.obs_sizeRange[i]) works on NumPy 2.x
         self.obs_sizeRange[0]= util.meter2pixel( config["obstacle"]["size"]["min"], self.m2p)
         self.obs_sizeRange[1]= util.meter2pixel( config["obstacle"]["size"]["max"], self.m2p)
 
