@@ -1,4 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editors and OS files
+.vscode/
+.idea/
+.DS_Store
+
+# Generated data, models and figures (regenerate with the scripts; see README)
 pseudoslam/envs/data/
+*.png
+!docs/*.png
+
+# Local copies
 pseudoslam-backup/
 pseudoslam-clean/
 pseudoslam-copy/

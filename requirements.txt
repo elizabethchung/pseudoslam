@@ -1,0 +1,14 @@
+# Tested with Python 3.11 and 3.12
+torch
+numpy
+scipy
+matplotlib
+opencv-python
+pyyaml
+
+# Only for the original PseudoSLAM Gym environment (pseudoslam/envs/robot_exploration_v0.py)
+gym
+
+# Only for some scripts in pseudoslam/envs/archive/
+# torchvision
+# ray[tune]
