@@ -7,7 +7,7 @@ import os
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
-from model_testing import test_model_with_gating_loader, test_model_with_gating_single_sample
+from pseudoslam.envs.model_testing import test_model_with_gating_loader, test_model_with_gating_single_sample
 
 
 # Function where you input an index and it shows you the lidar, tsdf, and label as printed array
@@ -751,7 +751,7 @@ class ImprovedResNetWithGating(nn.Module):
     
 
 # Load data
-base_dir = os.path.dirname(os.path.abspath(__file__))
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # pseudoslam/envs (data/ lives there)
 data_dir = os.path.join(base_dir, "data")
 training_lidar = np.load(os.path.join(data_dir, "fix_training_lidar.npy"))
 training_labels = np.load(os.path.join(data_dir, "fix_training_labels.npy"))

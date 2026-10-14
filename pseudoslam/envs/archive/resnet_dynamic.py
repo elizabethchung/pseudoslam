@@ -7,11 +7,21 @@ import os
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
-from model_testing import test_model_with_gating_loader, test_model_with_gating_single_sample
+from pseudoslam.envs.model_testing import test_model_with_gating_loader, test_model_with_gating_single_sample
 import math
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+num_epochs = 10
+batch_size = 64
+learning_rate = 0.0001
+torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner for faster training
+
+torch.autograd.set_detect_anomaly(True)
+torch.cuda.empty_cache()
 
 # Function where you input an index and it shows you the lidar, tsdf, and label as printed array
 def print_sample_data(lidar_data, label, index=0):
@@ -25,16 +35,49 @@ def print_sample_data(lidar_data, label, index=0):
     print("\nLabel:")
     print(label[index])
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-num_epochs = 150
-batch_size = 64
-learning_rate = 0.0001
-torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner for faster training
+def visualize_input_sample(lidar_data, tsdf_data, label, pred, mask=None):
+    fig, axs = plt.subplots(4, 1, figsize=(16, 8))
+    _, axs = plt.subplots(4, 1, figsize=(16, 8))
+    axs[0].plot(lidar_data[0].cpu().numpy(), label='LiDAR')
+    axs[0].legend()
+    
+    axs[1].imshow(tsdf_data[0].cpu().numpy().sum(axis=0), aspect='auto')
+    axs[1].set_title("TSDF sum")
+    
+    axs[2].plot(label[0].cpu().numpy(), label='Ground Truth')
+    axs[2].plot(pred[0].detach().cpu().numpy(), label='Prediction')
+    axs[2].legend()
+    
+    if mask is not None:
+        axs[3].plot(mask[0].cpu().numpy(), label='Valid Mask')
+        axs[3].legend()
+        
+    plt.tight_layout()
+    plt.show()
 
-torch.autograd.set_detect_anomaly(True)
-torch.cuda.empty_cache()
 
+def get_obstacle_counts(batch_labels):
+    if isinstance(batch_labels, np.ndarray):
+        batch_labels = torch.tensor(batch_labels)
+
+    if batch_labels.ndim == 1:
+        batch_labels = batch_labels.unsqueeze(0)  # (360,) → (1, 360)
+
+    counts = []
+    for row in batch_labels:
+        row = row.int()
+        extended = torch.cat([row, row[:1]])
+        diff = torch.diff(extended)
+        starts = (diff == 1).sum()
+        ends = (diff == -1).sum()
+        count = min(starts, ends)
+
+        if row.sum() == 360:
+            count = 1
+
+        counts.append(count)
+
+    return torch.tensor(counts, dtype=torch.float32).unsqueeze(1)
 
 def is_flat(lidar, i, threshold=1.0):
     return abs(lidar[(i+1)%360] + lidar[(i-1)%360] - 2*lidar[i]) < threshold
@@ -192,90 +235,157 @@ def extract_min_max_from_targets(batch_targets, device):
         torch.tensor(min_indices, device=device, dtype=torch.long),
         torch.tensor(max_indices, device=device, dtype=torch.long),
     )
-def single_obstacle_loss_with_constraints(predictions, obstacle_targets,
-                                          alpha=0.5,
-                                          confidence_weight=1.0,
-                                          span_constraint_weight=0.3):
+
+def improved_multi_obstacle_loss_with_constraints(predictions, obstacle_targets,
+                                                alpha=0.5,
+                                                confidence_weight=1.0,
+                                                span_constraint_weight=0.3,
+                                                diversity_weight=1.0,
+                                                count_weight=1.0):
     """
-    Loss function for model that predicts only 1 obstacle.
+    Enhanced loss function with span constraints and diversity enforcement
     """
-    min_pred_logits = predictions['min_logits']  # (B, 1, 360)
-    max_pred_logits = predictions['max_logits']  # (B, 1, 360)
-    confidence_logits = predictions['confidence']  # (B, 1, 360)
     
+    min_pred_logits = predictions['min_logits']  # (B, 3, 360)
+    max_pred_logits = predictions['max_logits']  # (B, 3, 360)
+    confidence_logits = predictions['confidence']  # (B, 3, 360)
+    count_logits = predictions['count_logits']  # (B, 4)']
+
     batch_size = min_pred_logits.shape[0]
+    max_obstacles = min_pred_logits.shape[1]
     
     total_position_loss = 0.0
     total_confidence_loss = 0.0
     total_span_constraint_loss = 0.0
+    total_diversity_loss = 0.0
+    valid_samples = 0
     
+    true_counts = []
+
     for batch_idx in range(batch_size):
         obstacle_regions = obstacle_targets[batch_idx]
-        has_obstacle = len(obstacle_regions) > 0
+        true_counts.append(len(obstacle_regions))
+        num_obstacles = len(obstacle_regions) if obstacle_regions else 0
         
-        min_logits = min_pred_logits[batch_idx, 0]
-        max_logits = max_pred_logits[batch_idx, 0]
-        conf_logits = confidence_logits[batch_idx, 0]
+        # Get predictions for this sample
+        min_probs = torch.softmax(min_pred_logits[batch_idx], dim=-1)  # (3, 360)
+        max_probs = torch.softmax(max_pred_logits[batch_idx], dim=-1)  # (3, 360)
         
-        if has_obstacle:
-            min_class, max_class = obstacle_regions[0]
+        # Process each obstacle slot
+        for slot_idx in range(max_obstacles):
+            if slot_idx < num_obstacles:
+                region = obstacle_regions[slot_idx]
+                
+                min_class = region[0]
+                max_class = region[1]
+                
+                # Calculate ground truth span width
+                if min_class <= max_class:
+                    gt_span_width = max_class - min_class + 1
+                else:
+                    gt_span_width = (360 - min_class) + (max_class + 1)
+                
+                # Position loss
+                min_target = torch.tensor(min_class, dtype=torch.long, device=min_pred_logits.device)
+                max_target = torch.tensor(max_class, dtype=torch.long, device=max_pred_logits.device)
+                
+                ce_min = F.cross_entropy(min_pred_logits[batch_idx, slot_idx:slot_idx+1], 
+                                       min_target.unsqueeze(0))
+                ce_max = F.cross_entropy(max_pred_logits[batch_idx, slot_idx:slot_idx+1], 
+                                       max_target.unsqueeze(0))
+                
+                total_position_loss += ce_min + ce_max
+                
+                # Confidence targets
+                confidence_target = torch.zeros_like(confidence_logits[batch_idx, slot_idx])
+                
+                if min_class <= max_class:
+                    confidence_target[min_class:max_class + 1] = 1.0
+                else:
+                    confidence_target[min_class:] = 1.0
+                    confidence_target[:max_class + 1] = 1.0
+                
+                conf_loss = F.binary_cross_entropy_with_logits(
+                    confidence_logits[batch_idx, slot_idx], 
+                    confidence_target
+                )
+                total_confidence_loss += conf_loss
+                
+                # SPAN CONSTRAINT LOSS: Penalize unrealistic span widths
+                pred_min_idx = torch.argmax(min_pred_logits[batch_idx, slot_idx])
+                pred_max_idx = torch.argmax(max_pred_logits[batch_idx, slot_idx])
+                
+                # Calculate predicted span width
+                if pred_min_idx <= pred_max_idx:
+                    pred_span_width = pred_max_idx - pred_min_idx + 1
+                else:
+                    pred_span_width = (360 - pred_min_idx) + (pred_max_idx + 1)
+                
+                # Penalize spans that are too wide (>200 degrees)
+                span_width_penalty = 0.0
+                if pred_span_width > 200:
+                    span_width_penalty += (pred_span_width - 200) ** 2 * 0.01
 
-            # Ground truth span width
-            gt_span_width = (max_class - min_class + 1) if min_class <= max_class else (360 - min_class + max_class + 1)
+                # Penalize spans that are very different from ground truth width
+                width_diff = abs(pred_span_width - gt_span_width)
+                if width_diff > 10:  # Allow some tolerance
+                    span_width_penalty += (width_diff - 10) ** 2 * 0.05
 
-            # Position loss
-            min_target = torch.tensor(min_class, dtype=torch.long, device=min_logits.device)
-            max_target = torch.tensor(max_class, dtype=torch.long, device=max_logits.device)
-            
-            ce_min = F.cross_entropy(min_logits.unsqueeze(0), min_target.unsqueeze(0))
-            ce_max = F.cross_entropy(max_logits.unsqueeze(0), max_target.unsqueeze(0))
-            total_position_loss += ce_min + ce_max
-
-            # Confidence target
-            confidence_target = torch.zeros_like(conf_logits)
-            if min_class <= max_class:
-                confidence_target[min_class:max_class + 1] = 1.0
+                total_span_constraint_loss += span_width_penalty
+                
+                valid_samples += 1
             else:
-                confidence_target[min_class:] = 1.0
-                confidence_target[:max_class + 1] = 1.0
-
-            conf_loss = F.binary_cross_entropy_with_logits(conf_logits, confidence_target)
-            total_confidence_loss += conf_loss
-
-            # Span constraint
-            pred_min_idx = torch.argmax(min_logits)
-            pred_max_idx = torch.argmax(max_logits)
-            pred_span_width = (pred_max_idx - pred_min_idx + 1) if pred_min_idx <= pred_max_idx else (360 - pred_min_idx + pred_max_idx + 1)
-
-            span_penalty = 0.0
-            if pred_span_width > 200:
-                span_penalty += (pred_span_width - 200) ** 2 * 0.01
-            width_diff = abs(pred_span_width - gt_span_width)
-            if width_diff > 10:
-                span_penalty += (width_diff - 10) ** 2 * 0.05
-
-            total_span_constraint_loss += span_penalty
+                # No obstacle - confidence should be low everywhere
+                conf_loss = F.binary_cross_entropy_with_logits(
+                    confidence_logits[batch_idx, slot_idx],
+                    torch.zeros_like(confidence_logits[batch_idx, slot_idx])
+                )
+                total_confidence_loss += conf_loss
+                valid_samples += 1
         
-        else:
-            # No obstacle — confidence should be zero everywhere
-            conf_loss = F.binary_cross_entropy_with_logits(conf_logits, torch.zeros_like(conf_logits))
-            total_confidence_loss += conf_loss
+        # DIVERSITY LOSS: Encourage different predictions for different slots
+        if num_obstacles >= 2:
+            for i in range(max_obstacles):
+                for j in range(i + 1, max_obstacles):
+                    # Penalize if min predictions are too similar
+                    min_similarity = torch.sum(min_probs[i] * min_probs[j])
+                    max_similarity = torch.sum(max_probs[i] * max_probs[j])
+                    
+                    # We want low similarity (more diversity)
+                    diversity_penalty = (min_similarity + max_similarity) * 0.1
+                    total_diversity_loss += diversity_penalty
+    
+    true_counts_tensor = torch.tensor(true_counts, dtype=torch.long, device=count_logits.device)
+    num_classes = count_logits.shape[1]
+    true_counts_tensor = torch.clamp(true_counts_tensor, 0, num_classes - 1)
 
-    # Normalize
-    avg_position_loss = total_position_loss / batch_size
-    avg_confidence_loss = total_confidence_loss / batch_size
-    avg_span_constraint_loss = total_span_constraint_loss / batch_size
+    count_loss = F.cross_entropy(count_logits, true_counts_tensor)
 
-    total_loss = (alpha * avg_position_loss +
+    # Normalize losses
+    if valid_samples > 0:
+        avg_position_loss = total_position_loss / valid_samples
+        avg_confidence_loss = total_confidence_loss / valid_samples
+        avg_span_constraint_loss = total_span_constraint_loss / valid_samples
+        avg_diversity_loss = total_diversity_loss / max(batch_size, 1)
+    else:
+        avg_position_loss = torch.tensor(0.0, device=min_pred_logits.device)
+        avg_confidence_loss = torch.tensor(0.0, device=min_pred_logits.device)
+        avg_span_constraint_loss = torch.tensor(0.0, device=min_pred_logits.device)
+        avg_diversity_loss = torch.tensor(0.0, device=min_pred_logits.device)
+    
+    total_loss = (alpha * avg_position_loss + 
                   confidence_weight * avg_confidence_loss +
-                  span_constraint_weight * avg_span_constraint_loss)
-
+                  span_constraint_weight * avg_span_constraint_loss +
+                  diversity_weight * avg_diversity_loss +
+                  count_weight * count_loss)
+    
     return total_loss, {
-        'position_loss': avg_position_loss.item() if hasattr(avg_position_loss, 'item') else avg_position_loss,
-        'confidence_loss': avg_confidence_loss.item() if hasattr(avg_confidence_loss, 'item') else avg_confidence_loss,
-        'span_constraint_loss': avg_span_constraint_loss.item() if hasattr(avg_span_constraint_loss, 'item') else avg_span_constraint_loss
+        'position_loss': avg_position_loss.item() if hasattr(avg_position_loss, "item") else avg_position_loss,
+        'confidence_loss': avg_confidence_loss.item() if hasattr(avg_confidence_loss, "item") else avg_confidence_loss,
+        'span_constraint_loss': avg_span_constraint_loss.item() if hasattr(avg_span_constraint_loss, "item") else avg_span_constraint_loss,
+        'diversity_loss': avg_diversity_loss.item() if hasattr(avg_diversity_loss, "item") else avg_diversity_loss,
+        'count_loss': count_loss.item() if hasattr(count_loss, "item") else count_loss
     }
-
 
 class LidarTSDFDataset(Dataset):
     def __init__(self, data, labels, mask=None, tsdf_cache_path=None):
@@ -384,7 +494,7 @@ class ResidualBlock(nn.Module):
         out = out + residual
         return self.relu(out)
 
-class ImprovedResNetNoGating1(nn.Module):
+class ImprovedResNetNoGating(nn.Module):
     def __init__(self):
         super().__init__()
         self.max_obstacles = 3
@@ -478,6 +588,14 @@ class ImprovedResNetNoGating1(nn.Module):
                 nn.Conv1d(16, 1, 1)
             ) for _ in range(self.max_obstacles)
         ])
+
+        self.count_head = nn.Sequential(
+            nn.AdaptiveAvgPool1d(4),
+            nn.Flatten(),
+            nn.Linear(128*4, 32),
+            nn.ReLU(),
+            nn.Linear(32, 4)  # 4 classes: 0, 1, 2, 3 obstacles
+        )
         
         self._initialize_heads_carefully()
         
@@ -550,6 +668,10 @@ class ImprovedResNetNoGating1(nn.Module):
         max_features = self.max_feature_extractor(x_fused)  # (B, 32, 360)
         conf_features = self.confidence_feature_extractor(x_fused)  # (B, 32, 360)
 
+        # Count
+        count_logits = self.count_head(x_fused)  # (B, 4) - logits for 0, 1, 2, 3 obstacles
+        count_pred = torch.argmax(count_logits, dim=1)  # Use raw logits for loss (cross-entropy expects logits)
+
         # Generate predictions
         all_min_logits = []
         all_max_logits = []
@@ -567,19 +689,19 @@ class ImprovedResNetNoGating1(nn.Module):
         return {
             'min_logits': torch.stack(all_min_logits, dim=1),      # (B, 3, 360)
             'max_logits': torch.stack(all_max_logits, dim=1),      # (B, 3, 360)
-            'confidence': torch.stack(all_confidence, dim=1)       # (B, 3, 360)
+            'confidence': torch.stack(all_confidence, dim=1),       # (B, 3, 360)
+            'count_logits': count_logits,  # (B, 4)
+            'count_pred': count_pred         # (B, 4)
         }
     
 
 # Load data
-base_dir = os.path.dirname(os.path.abspath(__file__))
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # pseudoslam/envs (data/ lives there)
 data_dir = os.path.join(base_dir, "data")
-training_lidar = np.load(os.path.join(data_dir, "fix_training_lidar_1obs.npy"))
-training_labels = np.load(os.path.join(data_dir, "fix_training_labels_1obs.npy"))
-testing_lidar = np.load(os.path.join(data_dir, "fix_testing_lidar_1obs.npy"))
-labels_test = np.load(os.path.join(data_dir, "fix_testing_labels_1obs.npy"))
-validation_lidar = np.load(os.path.join(data_dir, "fix_validation_lidar_1obs.npy"))
-validation_labels = np.load(os.path.join(data_dir, "fix_validation_labels_1obs.npy"))
+training_lidar = np.load(os.path.join(data_dir, "fix_training_lidar.npy"))
+training_labels = np.load(os.path.join(data_dir, "fix_training_labels.npy"))
+testing_lidar = np.load(os.path.join(data_dir, "fix_testing_lidar.npy"))
+labels_test = np.load(os.path.join(data_dir, "fix_testing_labels.npy"))
 
 
 # Debug: Print shapes to verify
@@ -587,23 +709,18 @@ print(f"Training lidar shape: {training_lidar.shape}")
 print(f"Training labels shape: {training_labels.shape}")
 print(f"Testing lidar shape: {testing_lidar.shape}")
 print(f"Testing labels shape: {labels_test.shape}")
-print(f"Validation lidar shape: {validation_lidar.shape}")
-print(f"Validation labels shape: {validation_labels.shape}")
 
 # Use labels as tensors
 training_targets = generate_multi_obstacle_targets(training_labels)
 training_min_indices, training_max_indices = extract_min_max_from_targets(training_targets, device)
 testing_targets = generate_multi_obstacle_targets(labels_test)
 testing_min_indices, testing_max_indices = extract_min_max_from_targets(testing_targets, device)
-validation_targets = generate_multi_obstacle_targets(validation_labels)
-validation_min_indices, validation_max_indices = extract_min_max_from_targets(validation_targets, device)
+
 
 print(f"Training min indices length: {len(training_min_indices)}")
 print(f"Training max indices length: {len(training_max_indices)}")
 print(f"Testing min indices length: {len(testing_min_indices)}")
 print(f"Testing max indices length: {len(testing_max_indices)}")
-print(f"Validation min indices length: {len(validation_min_indices)}")
-print(f"Validation max indices length: {len(validation_max_indices)}")
 
 print("Batch min/max labels:", training_labels.min().item(), training_labels.max().item())
 
@@ -644,52 +761,46 @@ def create_biased_mask(labels, keep_1_prob=1.0, keep_0_prob=0.1):
 
 training_mask = create_biased_mask(training_labels, keep_1_prob=1.0, keep_0_prob=0.1)
 testing_mask = np.ones_like(labels_test, dtype=np.float32)
-validation_mask = np.ones_like(validation_labels, dtype=np.float32)
 
 train_dataset = LidarTSDFDataset(
     training_lidar, 
     (training_min_indices, training_max_indices), 
     training_mask,
-    tsdf_cache_path=os.path.join(data_dir, "tsdf_train_1obs.npy")
+    tsdf_cache_path=os.path.join(data_dir, "fix_tsdf_train.npy")
 )
 
 test_dataset = LidarTSDFDataset(
     testing_lidar, 
     (testing_min_indices, testing_max_indices), 
     testing_mask,
-    tsdf_cache_path=os.path.join(data_dir, "tsdf_test_1obs.npy")
+    tsdf_cache_path=os.path.join(data_dir, "fix_tsdf_test.npy")
 )
 
-validation_dataset = LidarTSDFDataset(
-    validation_lidar,
-    (validation_min_indices, validation_max_indices),
-    validation_mask,
-    tsdf_cache_path=os.path.join(data_dir, "tsdf_val_1obs.npy")
-)
-
-# debug_dataset_labels(train_dataset, num_samples=5)
-# debug_dataset_labels(test_dataset, num_samples=5)
 
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=4)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=4)
-validation_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=4)
 
 
 # Use improved model without gating
-resnet = ImprovedResNetNoGating1().to(device)
+resnet = ImprovedResNetNoGating().to(device)
 
 
 def train_model():
     optimizer = optim.AdamW(resnet.parameters(), lr=0.0001, weight_decay=1e-3)  
     
+    # CRITICAL: More gradual learning rate decay
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.7, patience=3
     )
     
     loss_history = []
-    val_loss_history = []
-    loss_components = {'position_loss': [], 'confidence_loss': [], 'span_constraint_loss': []}
+    loss_components = {'position_loss': [], 
+                       'confidence_loss': [], 
+                       'span_constraint_loss': [], 
+                       'diversity_loss': [],
+                       'count_loss': []}
     
+    # Add gradient checking
     def check_gradients():
         total_norm = 0
         param_count = 0
@@ -705,23 +816,27 @@ def train_model():
     for epoch in range(num_epochs):
         resnet.train()
         epoch_loss = 0.0
-        epoch_components = {'position_loss': 0.0, 'confidence_loss': 0.0, 'span_constraint_loss': 0.0}
+        epoch_components = {'position_loss': 0.0, 'confidence_loss': 0.0}
         batch_count = 0
         
         for batch_idx, (distances, labels, _, tsdf) in enumerate(train_loader):
             distances = distances.to(device)
             tsdf = tsdf.to(device)
             
+            # Generate targets
             obstacle_targets = generate_multi_obstacle_targets(labels)
             
+            # CRITICAL: Check for empty targets
             if not any(len(targets) > 0 for targets in obstacle_targets):
                 print(f"WARNING: Batch {batch_idx} has no obstacles, skipping")
                 continue
 
             optimizer.zero_grad()
             
+            # Forward pass
             predictions = resnet(distances, tsdf)
             
+            # CRITICAL: Add prediction debugging
             if batch_idx == 0 and epoch % 2 == 0:
                 min_preds = torch.argmax(predictions['min_logits'][0], dim=-1)
                 max_preds = torch.argmax(predictions['max_logits'][0], dim=-1)
@@ -732,18 +847,22 @@ def train_model():
                 print(f"  Conf: {conf_preds.mean(dim=-1).detach().cpu().numpy()}")
                 print(f"  Ground truth: {obstacle_targets[0]}")
 
-            loss, components = single_obstacle_loss_with_constraints(predictions, obstacle_targets)
-
+            # Loss computation with the fixed function
+            loss, components = improved_multi_obstacle_loss_with_constraints(predictions, obstacle_targets)
+            
+            # CRITICAL: Check for NaN loss
             if torch.isnan(loss):
                 print(f"NaN loss detected at epoch {epoch}, batch {batch_idx}")
                 continue
                 
             loss.backward()
             
+            # Check gradients
             grad_norm = check_gradients()
-            if grad_norm > 10.0:
+            if grad_norm > 10.0:  # Gradient explosion check
                 print(f"Large gradient norm: {grad_norm:.4f}")
             
+            # CRITICAL: Gradient clipping
             torch.nn.utils.clip_grad_norm_(resnet.parameters(), max_norm=1.0)
             optimizer.step()
             
@@ -762,54 +881,32 @@ def train_model():
             continue
             
         avg_epoch_loss = epoch_loss / batch_count
-        
-        # Validation loop (no grad)
-        resnet.eval()
-        val_epoch_loss = 0.0
-        val_batch_count = 0
-        with torch.no_grad():
-            for val_batch_idx, (distances, labels, _, tsdf) in enumerate(validation_loader):
-                distances = distances.to(device)
-                tsdf = tsdf.to(device)
-                obstacle_targets = generate_multi_obstacle_targets(labels)
-                if not any(len(targets) > 0 for targets in obstacle_targets):
-                    continue
-                
-                predictions = resnet(distances, tsdf)
-                val_loss, _ = single_obstacle_loss_with_constraints(predictions, obstacle_targets)
-                val_epoch_loss += val_loss.item()
-                val_batch_count += 1
-        
-        avg_val_loss = val_epoch_loss / max(val_batch_count, 1)
-        
-        scheduler.step(avg_val_loss)
-        
+        scheduler.step(avg_epoch_loss)  # Use loss for scheduling
         loss_history.append(avg_epoch_loss)
-        val_loss_history.append(avg_val_loss)
+        
         for key in epoch_components:
             loss_components[key].append(epoch_components[key] / batch_count)
         
-        print(f'Epoch [{epoch+1}/{num_epochs}] Average Training Loss: {avg_epoch_loss:.4f}')
-        print(f'Epoch [{epoch+1}/{num_epochs}] Average Validation Loss: {avg_val_loss:.4f}')
+        print(f'Epoch [{epoch+1}/{num_epochs}] Average Loss: {avg_epoch_loss:.4f}')
         print(f'  Position Loss: {epoch_components["position_loss"]/batch_count:.4f}')
         print(f'  Confidence Loss: {epoch_components["confidence_loss"]/batch_count:.4f}')
         
-        # Early stopping
+        # Early stopping check
         if len(loss_history) > 10:
             recent_losses = loss_history[-10:]
             if max(recent_losses) - min(recent_losses) < 0.001:
                 print("Loss plateaued, stopping early")
                 break
     
-    return loss_history, val_loss_history, loss_components
+    return loss_history, loss_components
 
-
-def improved_post_processing(predictions, num_expected_obstacles=1):
+def improved_post_processing(predictions):
     """
     Post-processing that ignores confidence and relies only on min/max logits.
     """
     min_pred_logits = predictions['min_logits']  # (B, num_slots, 360)
     max_pred_logits = predictions['max_logits']  # (B, num_slots, 360)
+    count_pred = predictions['count_pred']  # (B, 4)
 
     batch_size = min_pred_logits.shape[0]
     num_slots = min_pred_logits.shape[1]
@@ -872,22 +969,52 @@ def improved_post_processing(predictions, num_expected_obstacles=1):
                 selected_obstacles.append((candidate['min_idx'], candidate['max_idx']))
                 used_indices.update(span_indices)
 
-            if len(selected_obstacles) >= num_expected_obstacles:
+            if len(selected_obstacles) >= count_pred[b].item():
                 break
 
         # Fallback: if not enough found
-        while len(selected_obstacles) < num_expected_obstacles:
+        while len(selected_obstacles) < count_pred[b].item():
             selected_obstacles.append((0, 10))  # dummy span
 
         batch_results.append(selected_obstacles)
 
     return batch_results
 
+def test_single_scan(distances, tsdf):
+    """
+    Run a single unlabeled LiDAR scan through the model and return predicted obstacle spans.
+    """
+    resnet.eval()
 
-def test_model_with_improved_processing(loss_history, loss_components, val_loss_history=None):
+    if isinstance(distances, np.ndarray):
+        distances = torch.tensor(distances, dtype=torch.float32)
+    if distances.ndim == 1: 
+        distances = distances.unsqueeze(0)  # (1, 360)
+    if distances.ndim == 2:
+        distances = distances.unsqueeze(1)  # (1, 1, 360)
+
+    distances = distances.to(device)
+
+    if tsdf is not None:
+        if isinstance(tsdf, np.ndarray):
+            tsdf = torch.tensor(tsdf, dtype=torch.float32)
+        if tsdf.ndim == 3:
+            tsdf = tsdf.unsqueeze(0)  # (1, C, H, W)
+        tsdf = tsdf.to(device)
+    else:
+        # Dummy TSDF if not provided — adjust shape if needed
+        tsdf = torch.zeros((1, 1, 30, 30), device=device)
+
+    with torch.no_grad():
+        predictions = resnet(distances, tsdf)
+        spans = improved_post_processing(predictions)
+
+    return spans[0]
+
+
+def test_model_with_improved_processing(loss_history, loss_components):
     """
     Updated test function using the improved post-processing
-    Optionally plots validation loss if provided.
     """
     resnet.eval()
     total_samples = 0
@@ -907,7 +1034,7 @@ def test_model_with_improved_processing(loss_history, loss_components, val_loss_
         predictions = resnet(distances, tsdf)
         
         # Use improved post-processing
-        batch_predicted_spans = improved_post_processing(predictions, num_expected_obstacles=1)
+        batch_predicted_spans = improved_post_processing(predictions)
 
         batch_size = distances.size(0)
         total_samples += batch_size
@@ -948,19 +1075,13 @@ def test_model_with_improved_processing(loss_history, loss_components, val_loss_
     print(f'Obstacle Detection Accuracy: {obstacle_accuracy:.2f}%')
     print(f'Average Width Error: {avg_error:.2f} degrees')
 
-    plt.figure(figsize=(18, 10))
+    plt.figure(figsize=(15, 10))
 
-    plt.subplot(2, 4, 1)
-    plt.plot(range(num_epochs), loss_history, label='Training Loss')
-    # if val_loss_history is not None:
-    #     plt.plot(range(num_epochs), val_loss_history, label='Validation Loss')
-    # Title the graph
-    plt.xlabel('Epochs')
-    plt.ylabel('Loss')
-    plt.title('1 Obstacle Training Loss')
-    plt.legend()
+    plt.subplot(2, 3, 1)
+    plt.plot(range(num_epochs), loss_history, label='Total Loss')
+    plt.xlabel('Epochs'); plt.ylabel('Loss'); plt.title('Training Loss'); plt.legend()
 
-    plt.subplot(2, 4, 2)
+    plt.subplot(2, 3, 2)
     for key, values in loss_components.items():
         # Skip if empty
         if values is None or len(values) == 0:
@@ -984,36 +1105,31 @@ def test_model_with_improved_processing(loss_history, loss_components, val_loss_
     plt.title('Loss Components')
     plt.legend()
 
-    plt.subplot(2, 4, 3)
+
+    plt.subplot(2, 3, 3)
     plt.title('No Gating Statistics')
     plt.text(0.5, 0.5, 'Gating removed', ha='center', va='center', fontsize=14)
     plt.axis('off')
 
     plt.tight_layout()
     plt.show()
-    plt.savefig("1_obs_training_loss.png")
-    print(f"Saved plot to 1_obs_training_loss.png")
-
 
     return obstacle_accuracy, avg_error
 
 
-
-
-def test_model_with_improved_processing_single(dataloader, num_expected_obstacles=1, verbose=False):
+def test_model_with_improved_processing_single(dataloader, verbose=False):
     """
     Runs the model on the provided dataloader and returns predicted obstacle spans.
 
     Args:
         dataloader (DataLoader): PyTorch DataLoader containing (distances, labels, _, tsdf)
-        num_expected_obstacles (int): Number of predicted obstacle spans per sample
         verbose (bool): Whether to print debug output for first few batches
 
     Returns:
         all_predictions (List[List[Tuple[int, int]]]): List of predicted spans for each sample
     """
-    test_resnet = ImprovedResNetNoGating1().to(device)
-    model_path = os.path.join(data_dir, "resnet_1obstest.pth")
+    test_resnet = ImprovedResNetNoGating().to(device)
+    model_path = os.path.join(data_dir, "resnet_dynamic.pth")
     test_resnet.load_state_dict(torch.load(model_path))
     test_resnet.eval()
     all_predictions = []
@@ -1026,7 +1142,7 @@ def test_model_with_improved_processing_single(dataloader, num_expected_obstacle
         with torch.no_grad():
             predictions = test_resnet(distances, tsdf)
 
-        batch_predicted_spans = improved_post_processing(predictions, num_expected_obstacles=num_expected_obstacles)
+        batch_predicted_spans = improved_post_processing(predictions)
         all_predictions.extend(batch_predicted_spans)
 
         if verbose and num_batches <= 3:
@@ -1055,8 +1171,8 @@ inspect_dataset_constructor()
 
 if __name__ == "__main__":
     # train_model_few_batches()
-    loss_history, val_loss_history, loss_components = train_model()
-    obstacle_accuracy, avg_error = test_model_with_improved_processing(loss_history, loss_components, val_loss_history)
+    loss_history, loss_components = train_model()
+    obstacle_accuracy, avg_error = test_model_with_improved_processing(loss_history, loss_components)
     # sample_lidar = testing_lidar[200]  # Use the first sample for testing
     # sample_tsdf = lidar_to_tsdf_obstacles(np.expand_dims(sample_lidar, axis=0))  # Get corresponding TSDF
     # Generate dummy labels (all 0s)
@@ -1078,7 +1194,7 @@ if __name__ == "__main__":
     # print("Actual obstacle spans:")
     # print(actual_obstacle_spans)
 
-    model_path = os.path.join(data_dir, "resnet_1obstest.pth")
+    model_path = os.path.join(data_dir, "resnet_dynamic.pth")
     torch.save(resnet.state_dict(), model_path)
     print(f'Model saved to {model_path}')
 

@@ -6,8 +6,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import numpy as np
 from pseudoslam.envs.resnet_3 import lidar_to_tsdf_obstacles, generate_multi_obstacle_targets, LidarTSDFDataset, extract_min_max_from_targets, create_biased_mask, ImprovedResNetNoGating3
-from pseudoslam.envs.resnet_1obs import ImprovedResNetNoGating1
-from pseudoslam.envs.resnet_2obs import ImprovedResNetNoGating2
+from pseudoslam.envs.archive.resnet_1obs import ImprovedResNetNoGating1
+from pseudoslam.envs.archive.resnet_2obs import ImprovedResNetNoGating2
 import matplotlib.pyplot as plt
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
@@ -27,7 +27,7 @@ torch.autograd.set_detect_anomaly(True)
 torch.cuda.empty_cache()
 
 # Load data
-base_dir = os.path.dirname(os.path.abspath(__file__))
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # pseudoslam/envs (data/ lives there)
 data_dir = os.path.join(base_dir, "data")
 training_lidar = np.load(os.path.join(data_dir, "fix_training_lidar.npy"))
 training_labels = np.load(os.path.join(data_dir, "fix_training_labels.npy"))
@@ -452,7 +452,7 @@ def create_transfer_learning_model(pretrained_model_paths, feature_dim=64):
     return model
 
 
-base_dir = os.path.dirname(os.path.abspath(__file__))
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # pseudoslam/envs (data/ lives there)
 data_dir = os.path.join(base_dir, "data")
 
 pretrained_model_paths = {

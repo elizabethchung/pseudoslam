@@ -7,7 +7,7 @@ import os
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
-from model_testing import test_model_with_gating_loader, test_model_with_gating_single_sample
+from pseudoslam.envs.model_testing import test_model_with_gating_loader, test_model_with_gating_single_sample
 import math
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
@@ -25,65 +25,22 @@ def print_sample_data(lidar_data, label, index=0):
     print("\nLabel:")
     print(label[index])
 
-def visualize_input_sample(lidar_data, tsdf_data, label, pred, mask=None):
-    fig, axs = plt.subplots(4, 1, figsize=(16, 8))
-    _, axs = plt.subplots(4, 1, figsize=(16, 8))
-    axs[0].plot(lidar_data[0].cpu().numpy(), label='LiDAR')
-    axs[0].legend()
-    
-    axs[1].imshow(tsdf_data[0].cpu().numpy().sum(axis=0), aspect='auto')
-    axs[1].set_title("TSDF sum")
-    
-    axs[2].plot(label[0].cpu().numpy(), label='Ground Truth')
-    axs[2].plot(pred[0].detach().cpu().numpy(), label='Prediction')
-    axs[2].legend()
-    
-    if mask is not None:
-        axs[3].plot(mask[0].cpu().numpy(), label='Valid Mask')
-        axs[3].legend()
-        
-    plt.tight_layout()
-    plt.show()
-
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
-num_epochs = 30
+num_epochs = 150
 batch_size = 64
-learning_rate = 0.00005
+learning_rate = 0.0001
 torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner for faster training
 
 torch.autograd.set_detect_anomaly(True)
 torch.cuda.empty_cache()
 
 
-def get_obstacle_counts(batch_labels):
-    if isinstance(batch_labels, np.ndarray):
-        batch_labels = torch.tensor(batch_labels)
-
-    if batch_labels.ndim == 1:
-        batch_labels = batch_labels.unsqueeze(0)  # (360,) → (1, 360)
-
-    counts = []
-    for row in batch_labels:
-        row = row.int()
-        extended = torch.cat([row, row[:1]])
-        diff = torch.diff(extended)
-        starts = (diff == 1).sum()
-        ends = (diff == -1).sum()
-        count = min(starts, ends)
-
-        if row.sum() == 360:
-            count = 1
-
-        counts.append(count)
-
-    return torch.tensor(counts, dtype=torch.float32).unsqueeze(1)
-
 def is_flat(lidar, i, threshold=1.0):
     return abs(lidar[(i+1)%360] + lidar[(i-1)%360] - 2*lidar[i]) < threshold
 
-def lidar_to_tsdf_obstacles(lidar_data, img_dim=32, max_range=200.0, trunc_thresh=3.0):
+
+def lidar_to_tsdf_obstacles(lidar_data, img_dim=32, max_range=200.0, trunc_thresh=3):
     """
     LIDAR to TSDF conversion with obstacle, free-space, and unknown channels.
     Unexplored regions are NOT treated as obstacles.
@@ -166,120 +123,11 @@ def lidar_to_tsdf_obstacles(lidar_data, img_dim=32, max_range=200.0, trunc_thres
                     obstacle_tsdf[b] = np.minimum(obstacle_tsdf[b], obs_sdf)
                     explored_mask[b][dist_to_obs <= 1.5] = True
 
-    # Create unknown channel: 1 where unexplored, scaled by trunc_thresh to positive values
-    unknown_channel = (~explored_mask).astype(np.float32) * trunc_thresh
-
-    # Obstacle channel: negative values where obstacles exist, zero elsewhere inside explored area, zero outside explored area
-    # Fill unexplored areas in obstacle channel with a large positive value (e.g., trunc_thresh)
-    obstacle_filled = np.where(explored_mask, obstacle_tsdf, trunc_thresh)
-    obstacle_channel = np.where(obstacle_filled < 0, obstacle_filled, 0.0)
-
-
-    # Free space channel: zero everywhere (inside and outside explored)
-    free_space_channel = np.zeros_like(obstacle_tsdf, dtype=np.float32)
-
-    # Stack channels in order: obstacle, free space, unknown
-    result = np.stack([obstacle_channel, free_space_channel, unknown_channel], axis=1)
-    # Print ranges of each
-    # print(f"Obstacle channel range: {result[0, 0].min()} to {result[0, 0].max()}")
-    # print(f"Free space channel range: {result[0, 1].min()} to {result[0, 1].max()}")
-    # print(f"Unknown channel range: {result[0, 2].min()} to {result[0, 2].max()}")
-
-    return result
-
-def tsdf_from_obstacle_ranges(obstacle_angle_ranges, 
-                                    img_dim=32, 
-                                    max_range=200.0, 
-                                    trunc_thresh=3.0, 
-                                    default_distance=200.0, 
-                                    obstacle_radius=5.0,
-                                    device='cpu'):
-    """
-    Generate a TSDF-like 3-channel map using obstacle angle ranges.
-    Returns a torch.Tensor of shape (B, 3, H, W) on given device.
-    
-    obstacle_angle_ranges: list of lists of (min_angle_deg, max_angle_deg) tuples
-    """
-    batch_size = len(obstacle_angle_ranges)
-    center = img_dim // 2
-    scale = img_dim / (2 * max_range)  # meters to pixels
-
-    y_indices, x_indices = torch.meshgrid(torch.arange(img_dim, device=device),
-                                          torch.arange(img_dim, device=device),
-                                          indexing='ij')
-    y_indices = y_indices.float()
-    x_indices = x_indices.float()
-
-    # Initialize TSDF channels
-    obstacle_tsdf = torch.full((batch_size, img_dim, img_dim), trunc_thresh, dtype=torch.float32, device=device)
-    free_space_tsdf = torch.full((batch_size, img_dim, img_dim), -trunc_thresh, dtype=torch.float32, device=device)
-    explored_mask = torch.zeros((batch_size, img_dim, img_dim), dtype=torch.bool, device=device)
-
-    for b in range(batch_size):
-        dist_from_center = torch.sqrt((x_indices - center)**2 + (y_indices - center)**2)
-        free_space_radius = default_distance * scale
-
-        inside_free_space = dist_from_center <= free_space_radius
-        explored_mask[b][inside_free_space] = True
-
-        free_space_tsdf[b][inside_free_space] = torch.clamp(free_space_radius - dist_from_center[inside_free_space], -trunc_thresh, trunc_thresh)
-        free_space_tsdf[b][~inside_free_space] = -trunc_thresh
-
-        for angle_range in obstacle_angle_ranges[b]:
-            min_angle_deg, max_angle_deg = angle_range
-
-            # Handle wrap-around midpoint
-            if max_angle_deg < min_angle_deg:
-                mid_angle_deg = (min_angle_deg + max_angle_deg + 360) / 2
-                if mid_angle_deg >= 360:
-                    mid_angle_deg -= 360
-            else:
-                mid_angle_deg = (min_angle_deg + max_angle_deg) / 2
-
-            angle_rad = torch.deg2rad(torch.tensor(mid_angle_deg, device=device))
-
-            x_obs = default_distance * torch.cos(angle_rad)
-            y_obs = default_distance * torch.sin(angle_rad)
-
-            x_grid = center + x_obs * scale
-            y_grid = center + y_obs * scale
-
-            if 0 <= x_grid < img_dim and 0 <= y_grid < img_dim:
-                dist_to_obs = torch.sqrt((x_indices - x_grid)**2 + (y_indices - y_grid)**2)
-                obs_sdf = dist_to_obs - obstacle_radius
-                obs_sdf = torch.clamp(obs_sdf, -trunc_thresh + 1, trunc_thresh)
-
-                obstacle_tsdf[b] = torch.min(obstacle_tsdf[b], obs_sdf)
-
-                ray_steps = int(default_distance * scale * 1.2)
-                for step in range(1, ray_steps):
-                    t = step / ray_steps
-                    x_ray = t * x_obs
-                    y_ray = t * y_obs
-                    x_ray_grid = center + x_ray * scale
-                    y_ray_grid = center + y_ray * scale
-
-                    if 0 <= x_ray_grid < img_dim and 0 <= y_ray_grid < img_dim:
-                        dist_to_ray = torch.sqrt((x_indices - x_ray_grid)**2 + (y_indices - y_ray_grid)**2)
-                        erase_mask = dist_to_ray <= 0.5
-                        free_space_tsdf[b][erase_mask] = trunc_thresh
-                        explored_mask[b][erase_mask] = True
-
-    # Clamp obstacle TSDF to max 0 (negative or zero only)
-    obstacle_tsdf = torch.minimum(obstacle_tsdf, torch.tensor(0.0, device=device))
-
-    # Free space channel set to zero everywhere (as in your original logic)
-    free_space_tsdf = torch.zeros_like(obstacle_tsdf, device=device)
-
-    # Unknown channel positive in [0, trunc_thresh]
-    unknown_channel = (~explored_mask).float() * trunc_thresh
-
-    result = torch.stack([obstacle_tsdf, free_space_tsdf, unknown_channel], dim=1)
-    
-    print(f"Obstacle channel range: {result[0, 0].min().item()} to {result[0, 0].max().item()}")
-    print(f"Free space channel range: {result[0, 1].min().item()} to {result[0, 1].max().item()}")
-    print(f"Unknown channel range: {result[0, 2].min().item()} to {result[0, 2].max().item()}")
-
+    unknown_channel = (~explored_mask).astype(np.float32)
+    # Final masking to ensure clean outputs
+    obstacle_tsdf = np.where(explored_mask, obstacle_tsdf, 0)
+    free_space_tsdf = np.where(explored_mask, free_space_tsdf, 0)
+    result = np.stack([obstacle_tsdf, free_space_tsdf, unknown_channel], axis=1)
     return result
 
 
@@ -314,8 +162,8 @@ def generate_multi_obstacle_targets(labels):
                 obstacle_regions.append(merged_region)
 
         # Print and save
-        # if sample_idx == 0:
-        #     print(f"Sample {sample_idx}: {len(obstacle_regions)} obstacles: {obstacle_regions}")
+        if sample_idx == 0:
+            print(f"Sample {sample_idx}: {len(obstacle_regions)} obstacles: {obstacle_regions}")
         batch_targets.append(obstacle_regions)
 
     return batch_targets
@@ -344,152 +192,89 @@ def extract_min_max_from_targets(batch_targets, device):
         torch.tensor(min_indices, device=device, dtype=torch.long),
         torch.tensor(max_indices, device=device, dtype=torch.long),
     )
-def soft_argmax(logits, beta=10.0):
+def single_obstacle_loss_with_constraints(predictions, obstacle_targets,
+                                          alpha=0.5,
+                                          confidence_weight=1.0,
+                                          span_constraint_weight=0.3):
     """
-    Compute soft-argmax over the last dimension (angles).
-    logits: (B, num_slots, 360)
-    Returns soft angle in degrees, shape (B, num_slots)
+    Loss function for model that predicts only 1 obstacle.
     """
-    angles = torch.arange(360, device=logits.device, dtype=torch.float32)  # (360,)
-    probs = F.softmax(logits * beta, dim=-1)  # sharpened softmax for sharper peaks
-    soft_angles = torch.sum(probs * angles, dim=-1)  # weighted average over angles
-    return soft_angles  # shape (B, num_slots)
+    min_pred_logits = predictions['min_logits']  # (B, 1, 360)
+    max_pred_logits = predictions['max_logits']  # (B, 1, 360)
+    confidence_logits = predictions['confidence']  # (B, 1, 360)
+    
+    batch_size = min_pred_logits.shape[0]
+    
+    total_position_loss = 0.0
+    total_confidence_loss = 0.0
+    total_span_constraint_loss = 0.0
+    
+    for batch_idx in range(batch_size):
+        obstacle_regions = obstacle_targets[batch_idx]
+        has_obstacle = len(obstacle_regions) > 0
+        
+        min_logits = min_pred_logits[batch_idx, 0]
+        max_logits = max_pred_logits[batch_idx, 0]
+        conf_logits = confidence_logits[batch_idx, 0]
+        
+        if has_obstacle:
+            min_class, max_class = obstacle_regions[0]
 
-def soft_interval_mask(min_angles, max_angles, device):
-    """
-    Create differentiable soft masks over 360 angles from soft min/max angles.
-    min_angles, max_angles: (B, num_slots), float, in degrees [0,360)
-    Returns: mask tensor (B, num_slots, 360) with values in [0,1]
-    """
-    B, num_slots = min_angles.shape
-    angles = torch.arange(360, device=device).float()  # (360,)
-    angles = angles.unsqueeze(0).unsqueeze(0)  # (1,1,360)
+            # Ground truth span width
+            gt_span_width = (max_class - min_class + 1) if min_class <= max_class else (360 - min_class + max_class + 1)
 
-    min_angles = min_angles.unsqueeze(-1)  # (B,num_slots,1)
-    max_angles = max_angles.unsqueeze(-1)  # (B,num_slots,1)
+            # Position loss
+            min_target = torch.tensor(min_class, dtype=torch.long, device=min_logits.device)
+            max_target = torch.tensor(max_class, dtype=torch.long, device=max_logits.device)
+            
+            ce_min = F.cross_entropy(min_logits.unsqueeze(0), min_target.unsqueeze(0))
+            ce_max = F.cross_entropy(max_logits.unsqueeze(0), max_target.unsqueeze(0))
+            total_position_loss += ce_min + ce_max
 
-    # Compute angular distance from min and max, accounting for wrap-around
-    dist_min = (angles - min_angles) % 360
-    dist_max = (max_angles - angles) % 360
+            # Confidence target
+            confidence_target = torch.zeros_like(conf_logits)
+            if min_class <= max_class:
+                confidence_target[min_class:max_class + 1] = 1.0
+            else:
+                confidence_target[min_class:] = 1.0
+                confidence_target[:max_class + 1] = 1.0
 
-    # Interval membership: points where dist_min + dist_max ~= interval size
-    interval_size = (max_angles - min_angles) % 360
+            conf_loss = F.binary_cross_entropy_with_logits(conf_logits, confidence_target)
+            total_confidence_loss += conf_loss
 
-    # Smooth membership with sigmoid functions (sharpness controls how soft the edges are)
-    sharpness = 50.0  # higher = sharper edges
+            # Span constraint
+            pred_min_idx = torch.argmax(min_logits)
+            pred_max_idx = torch.argmax(max_logits)
+            pred_span_width = (pred_max_idx - pred_min_idx + 1) if pred_min_idx <= pred_max_idx else (360 - pred_min_idx + pred_max_idx + 1)
 
-    # Membership mask: sigmoid transitions at interval boundaries
-    mask_min = torch.sigmoid(sharpness * (dist_min))  # grows from 0 at min_angle going forward
-    mask_max = torch.sigmoid(sharpness * (dist_max))  # grows from 0 at max_angle going backward
+            span_penalty = 0.0
+            if pred_span_width > 200:
+                span_penalty += (pred_span_width - 200) ** 2 * 0.01
+            width_diff = abs(pred_span_width - gt_span_width)
+            if width_diff > 10:
+                span_penalty += (width_diff - 10) ** 2 * 0.05
 
-    # The mask is 1 inside the interval and near zero outside:
-    mask = mask_min * mask_max  # approximate intersection (AND) with smooth edges
+            total_span_constraint_loss += span_penalty
+        
+        else:
+            # No obstacle — confidence should be zero everywhere
+            conf_loss = F.binary_cross_entropy_with_logits(conf_logits, torch.zeros_like(conf_logits))
+            total_confidence_loss += conf_loss
 
-    # Normalize max to 1 approx:
-    mask = mask / mask.max(dim=-1, keepdim=True)[0]
+    # Normalize
+    avg_position_loss = total_position_loss / batch_size
+    avg_confidence_loss = total_confidence_loss / batch_size
+    avg_span_constraint_loss = total_span_constraint_loss / batch_size
 
-    return mask  # shape (B, num_slots, 360), values approx 0..1
-
-def soft_tsdf_from_masks(masks, img_dim=32, max_range=200.0, trunc_thresh=3.0, default_distance=200.0, obstacle_radius=5.0, device='cpu'):
-    B, num_slots, _ = masks.shape
-    center = img_dim // 2
-    scale = img_dim / (2 * max_range)  # meters to pixels
-
-    y_indices, x_indices = torch.meshgrid(torch.arange(img_dim, device=device),
-                                          torch.arange(img_dim, device=device),
-                                          indexing='ij')
-    y_indices = y_indices.float()
-    x_indices = x_indices.float()
-
-    obstacle_tsdf = torch.full((B, img_dim, img_dim), trunc_thresh, dtype=torch.float32, device=device)
-    free_space_tsdf = torch.full((B, img_dim, img_dim), -trunc_thresh, dtype=torch.float32, device=device)
-    unknown_channel = torch.zeros((B, img_dim, img_dim), dtype=torch.float32, device=device)  # pre-allocate batch
-
-    dx = x_indices - center
-    dy = y_indices - center
-    pixel_angles = torch.atan2(dy, dx)  # radians [-pi, pi]
-    pixel_angles = torch.remainder(torch.rad2deg(pixel_angles) + 360, 360)
-
-    for b in range(B):
-        obstacle_sdf_accum = torch.full((img_dim, img_dim), trunc_thresh, device=device)
-        free_space_accum = torch.full((img_dim, img_dim), -trunc_thresh, device=device)
-        explored_accum = torch.zeros((img_dim, img_dim), device=device)
-
-        for s in range(num_slots):
-            mask = masks[b, s]
-
-            lower_idx = torch.floor(pixel_angles).long() % 360
-            upper_idx = (lower_idx + 1) % 360
-            weight_upper = pixel_angles - lower_idx.float()
-            weight_lower = 1 - weight_upper
-
-            mask_lower = mask[lower_idx]
-            mask_upper = mask[upper_idx]
-            pixel_mask = weight_lower * mask_lower + weight_upper * mask_upper
-
-            slot_angle = torch.sum(torch.arange(360, device=device).float() * F.softmax(masks[b, s] * 50, dim=0))
-
-            angle_rad = torch.deg2rad(slot_angle)
-            x_obs = default_distance * torch.cos(angle_rad)
-            y_obs = default_distance * torch.sin(angle_rad)
-
-            x_grid = center + x_obs * scale
-            y_grid = center + y_obs * scale
-
-            dist_to_obs = torch.sqrt((x_indices - x_grid) ** 2 + (y_indices - y_grid) ** 2)
-            obs_sdf = dist_to_obs - obstacle_radius
-            obs_sdf = torch.clamp(obs_sdf, -trunc_thresh + 1, trunc_thresh)
-
-            weighted_obs_sdf = obs_sdf * pixel_mask + trunc_thresh * (1 - pixel_mask)
-            obstacle_sdf_accum = torch.min(obstacle_sdf_accum, weighted_obs_sdf)
-
-            explored_accum += pixel_mask
-
-            # You can expand free_space_accum logic here if desired
-
-        obstacle_tsdf[b] = torch.minimum(obstacle_sdf_accum, torch.tensor(0.0, device=device))
-        free_space_tsdf[b] = torch.zeros_like(obstacle_tsdf[b])
-        unknown_channel[b] = (explored_accum < 0.1).float() * trunc_thresh
-
-    result = torch.stack([obstacle_tsdf, free_space_tsdf, unknown_channel], dim=1)
-    return result
-
-
-def improved_multi_obstacle_tsdf_loss(predictions, tsdf_targets,
-                                      img_dim=32, trunc_thresh=3.0, max_range=200.0,
-                                      overlap_weight=0.2,
-                                      bad_range_weight=0.2,
-                                      tsdf_weight=1.0):
-    min_logits = predictions['min_logits']  # (B, num_slots, 360)
-    max_logits = predictions['max_logits']  # (B, num_slots, 360)
-
-    B, num_slots, _ = min_logits.shape
-    device = min_logits.device
-
-    # Use soft-argmax instead of argmax
-    min_soft = soft_argmax(min_logits)  # (B, num_slots)
-    max_soft = soft_argmax(max_logits)  # (B, num_slots)
-
-    # Create soft interval masks
-    masks = soft_interval_mask(min_soft, max_soft, device=device)  # (B, num_slots, 360)
-
-    # Generate differentiable TSDF
-    pred_tsdf = soft_tsdf_from_masks(masks, img_dim=img_dim, max_range=max_range, trunc_thresh=trunc_thresh, device=device)
-
-    # Ensure tsdf_targets on device
-    tsdf_targets = tsdf_targets.to(device)
-
-    tsdf_loss = F.l1_loss(pred_tsdf, tsdf_targets)
-
-    # You can add differentiable range size and overlap penalties here if you implement differentiable versions
-
-    total_loss = tsdf_weight * tsdf_loss
+    total_loss = (alpha * avg_position_loss +
+                  confidence_weight * avg_confidence_loss +
+                  span_constraint_weight * avg_span_constraint_loss)
 
     return total_loss, {
-        'tsdf_loss': tsdf_loss.item(),
-        'total_loss': total_loss.item()
+        'position_loss': avg_position_loss.item() if hasattr(avg_position_loss, 'item') else avg_position_loss,
+        'confidence_loss': avg_confidence_loss.item() if hasattr(avg_confidence_loss, 'item') else avg_confidence_loss,
+        'span_constraint_loss': avg_span_constraint_loss.item() if hasattr(avg_span_constraint_loss, 'item') else avg_span_constraint_loss
     }
-
 
 
 class LidarTSDFDataset(Dataset):
@@ -535,9 +320,9 @@ class LidarTSDFDataset(Dataset):
             self.min_indices = torch.tensor(min_indices, device=device)  # shape: [batch_size, num_obstacles]
             self.max_indices = torch.tensor(max_indices, device=device)  # same
 
-        min_len = min(len(self.data), len(self.labels), len(self.mask) if self.mask is not None else float('inf'))
-        if len(self.data) != len(self.labels) or (self.mask is not None and len(self.data) != len(self.mask)):
-            print(f"Warning: data length ({len(self.data)}), labels length ({len(self.labels)}), mask length ({len(self.mask) if self.mask is not None else 'N/A'})")
+        min_len = min(len(self.data), len(self.labels))
+        if len(self.data) != len(self.labels):
+            print(f"Warning: data length ({len(self.data)}) != labels length ({len(self.labels)})")
             print(f"Truncating to minimum length: {min_len}")
             self.data = self.data[:min_len]
             self.labels = self.labels[:min_len]
@@ -547,20 +332,20 @@ class LidarTSDFDataset(Dataset):
                 self.mask = self.mask[:min_len]
 
         # === TSDF Caching ===
-        # if tsdf_cache_path and os.path.exists(tsdf_cache_path):
-        #     print(f"Loading TSDF from {tsdf_cache_path}")
-        #     self.tsdf_maps = np.load(tsdf_cache_path)
-        # else:
-        #     print("Computing TSDF maps...")
-        #     self.tsdf_maps = lidar_to_tsdf_obstacles(self.data)
-        #     if tsdf_cache_path:
-        #         np.save(tsdf_cache_path, self.tsdf_maps)
-        #         print(f"Saved TSDF maps to {tsdf_cache_path}")
-        print("Computing TSDF maps...")
-        self.tsdf_maps = lidar_to_tsdf_obstacles(self.data)
-        if tsdf_cache_path:
-            np.save(tsdf_cache_path, self.tsdf_maps)
-            print(f"Saved TSDF maps to {tsdf_cache_path}")
+        if tsdf_cache_path and os.path.exists(tsdf_cache_path):
+            print(f"Loading TSDF from {tsdf_cache_path}")
+            self.tsdf_maps = np.load(tsdf_cache_path)
+        else:
+            print("Computing TSDF maps...")
+            self.tsdf_maps = lidar_to_tsdf_obstacles(self.data)
+            if tsdf_cache_path:
+                np.save(tsdf_cache_path, self.tsdf_maps)
+                print(f"Saved TSDF maps to {tsdf_cache_path}")
+        # print("Computing TSDF maps...")
+        # self.tsdf_maps = lidar_to_tsdf_obstacles(self.data)
+        # if tsdf_cache_path:
+        #     np.save(tsdf_cache_path, self.tsdf_maps)
+        #     print(f"Saved TSDF maps to {tsdf_cache_path}")
 
     def __len__(self):
         return len(self.data)
@@ -599,47 +384,64 @@ class ResidualBlock(nn.Module):
         out = out + residual
         return self.relu(out)
 
-
-class ImprovedResNetNoGating3_LiDAROnly(nn.Module):
+class ImprovedResNetNoGating1(nn.Module):
     def __init__(self):
         super().__init__()
         self.max_obstacles = 3
+        
+        # Enhanced LiDAR processing with attention
+        self.lidar_layer1 = ResidualBlock(1, 32, dropout=0.1)
+        self.lidar_layer2 = ResidualBlock(32, 64, dropout=0.1)
+        self.lidar_layer3 = ResidualBlock(64, 128, dropout=0.1)
 
-        # LiDAR processing
-        self.lidar_layer1 = ResidualBlock(1, 32, dropout=0.2)
-        self.lidar_layer2 = ResidualBlock(32, 64, dropout=0.2)
-        self.lidar_layer3 = ResidualBlock(64, 128, dropout=0.3)
-
-        # LiDAR attention
+        # Add attention mechanism for LiDAR
         self.lidar_attention = nn.MultiheadAttention(embed_dim=128, num_heads=8, batch_first=True)
+        
+        # Enhanced TSDF processing
+        self.tsdf_conv2d = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1, None))
+        )
 
-        # Fusion removed, replaced with simpler head
-        self.post_lidar = nn.Sequential(
-            nn.Conv1d(128, 128, kernel_size=3, padding=1),
+        # Fusion with more sophisticated combination
+        self.fusion_layer = nn.Sequential(
+            nn.Conv1d(256, 256, kernel_size=3, padding=1),  # 128 + 128
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Conv1d(256, 128, kernel_size=3, padding=1),
             nn.BatchNorm1d(128),
             nn.ReLU()
         )
+
         self.dropout_fused = nn.Dropout(p=0.2)
-
-        # Task-specific feature extractors
+        
+        # Separate feature extractors for different tasks
         self.min_feature_extractor = nn.Sequential(
-            nn.Conv1d(128, 64, kernel_size=5, padding=2),
+            nn.Conv1d(128, 64, kernel_size=5, padding=2),  # Larger receptive field
             nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.Conv1d(64, 32, kernel_size=3, padding=1),
             nn.BatchNorm1d(32),
             nn.ReLU()
         )
-
+        
         self.max_feature_extractor = nn.Sequential(
-            nn.Conv1d(128, 64, kernel_size=7, padding=3),
+            nn.Conv1d(128, 64, kernel_size=7, padding=3),  # Even larger receptive field
             nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.Conv1d(64, 32, kernel_size=3, padding=1),
             nn.BatchNorm1d(32),
             nn.ReLU()
         )
-
+        
         self.confidence_feature_extractor = nn.Sequential(
             nn.Conv1d(128, 64, kernel_size=3, padding=1),
             nn.BatchNorm1d(64),
@@ -648,8 +450,8 @@ class ImprovedResNetNoGating3_LiDAROnly(nn.Module):
             nn.BatchNorm1d(32),
             nn.ReLU()
         )
-
-        # Prediction heads
+        
+        # Final prediction heads - much simpler
         self.min_heads = nn.ModuleList([
             nn.Sequential(
                 nn.Conv1d(32, 16, 1),
@@ -658,7 +460,7 @@ class ImprovedResNetNoGating3_LiDAROnly(nn.Module):
                 nn.Conv1d(16, 1, 1)
             ) for _ in range(self.max_obstacles)
         ])
-
+        
         self.max_heads = nn.ModuleList([
             nn.Sequential(
                 nn.Conv1d(32, 16, 1),
@@ -667,7 +469,7 @@ class ImprovedResNetNoGating3_LiDAROnly(nn.Module):
                 nn.Conv1d(16, 1, 1)
             ) for _ in range(self.max_obstacles)
         ])
-
+        
         self.confidence_heads = nn.ModuleList([
             nn.Sequential(
                 nn.Conv1d(32, 16, 1),
@@ -676,75 +478,108 @@ class ImprovedResNetNoGating3_LiDAROnly(nn.Module):
                 nn.Conv1d(16, 1, 1)
             ) for _ in range(self.max_obstacles)
         ])
-
+        
         self._initialize_heads_carefully()
-
+        
     def _initialize_heads_carefully(self):
+        """More careful initialization to encourage different behaviors"""
+        
+        # Initialize min heads to prefer earlier indices
         for i, head in enumerate(self.min_heads):
             for layer in head:
                 if isinstance(layer, nn.Conv1d):
+                    # Custom initialization for min heads
                     nn.init.xavier_normal_(layer.weight, gain=0.5)
                     if layer.bias is not None:
+                        # Bias toward smaller indices for min heads
                         nn.init.constant_(layer.bias, -0.2 - i * 0.1)
-
+        
+        # Initialize max heads to prefer later indices
         for i, head in enumerate(self.max_heads):
             for layer in head:
                 if isinstance(layer, nn.Conv1d):
                     nn.init.xavier_normal_(layer.weight, gain=1.0)
                     if layer.bias is not None:
+                        # Bias toward larger indices for max heads
                         nn.init.constant_(layer.bias, 0.2 + i * 0.1)
-
+        
+        # Initialize confidence heads conservatively
         for head in self.confidence_heads:
             for layer in head:
                 if isinstance(layer, nn.Conv1d):
                     nn.init.xavier_normal_(layer.weight, gain=0.1)
                     if layer.bias is not None:
-                        nn.init.constant_(layer.bias, -1.5)
-
-    def forward(self, lidar_data, tsdf_data=None, mask=None):
-        # LiDAR processing
+                        nn.init.constant_(layer.bias, -1.5)  # Start conservative
+                
+    def forward(self, lidar_data, tsdf_data):
+        batch_size = lidar_data.shape[0]
+        
+        # Process LiDAR with attention
         x_lidar = self.lidar_layer1(lidar_data)
         x_lidar = self.lidar_layer2(x_lidar)
         x_lidar = self.lidar_layer3(x_lidar)
-
-        # Attention
+        
+        # Apply attention to LiDAR features
         x_lidar_transposed = x_lidar.transpose(1, 2)  # (B, 360, 128)
         x_lidar_attended, _ = self.lidar_attention(x_lidar_transposed, x_lidar_transposed, x_lidar_transposed)
-        x_lidar = x_lidar_attended.transpose(1, 2)  # (B, 128, 360)
+        x_lidar = x_lidar_attended.transpose(1, 2)  # Back to (B, 128, 360)
 
-        # Post-LiDAR refinement
-        x_fused = self.post_lidar(x_lidar)
+        # Process TSDF
+        while tsdf_data.ndim > 4:
+            tsdf_data = tsdf_data.squeeze(0)
+        
+        if tsdf_data.shape[-1] != 360:
+            tsdf_data = F.interpolate(tsdf_data, size=(tsdf_data.shape[2], 360), 
+                                    mode='bilinear', align_corners=False)
+
+        tsdf_feat = self.tsdf_conv2d(tsdf_data)  # (B, 128, 1, 360)
+        tsdf_feat = tsdf_feat.squeeze(2)  # (B, 128, 360)
+
+        # Ensure same sequence length
+        if tsdf_feat.shape[-1] != x_lidar.shape[-1]:
+            tsdf_feat = F.interpolate(tsdf_feat, size=x_lidar.shape[-1], 
+                                    mode='linear', align_corners=False)
+        
+        # Fusion
+        x_fused = torch.cat([x_lidar, tsdf_feat], dim=1)  # (B, 256, 360)
+        x_fused = self.fusion_layer(x_fused)  # (B, 128, 360)
         x_fused = self.dropout_fused(x_fused)
 
-        # Extract features
-        min_features = self.min_feature_extractor(x_fused)
-        max_features = self.max_feature_extractor(x_fused)
-        conf_features = self.confidence_feature_extractor(x_fused)
+        # Extract task-specific features
+        min_features = self.min_feature_extractor(x_fused)  # (B, 32, 360)
+        max_features = self.max_feature_extractor(x_fused)  # (B, 32, 360)
+        conf_features = self.confidence_feature_extractor(x_fused)  # (B, 32, 360)
 
-        # Heads
+        # Generate predictions
         all_min_logits = []
         all_max_logits = []
         all_confidence = []
-
+        
         for i in range(self.max_obstacles):
-            all_min_logits.append(self.min_heads[i](min_features).squeeze(1))
-            all_max_logits.append(self.max_heads[i](max_features).squeeze(1))
-            all_confidence.append(self.confidence_heads[i](conf_features).squeeze(1))
+            min_logits = self.min_heads[i](min_features).squeeze(1)  # (B, 360)
+            max_logits = self.max_heads[i](max_features).squeeze(1)  # (B, 360)
+            confidence = self.confidence_heads[i](conf_features).squeeze(1)  # (B, 360)
+            
+            all_min_logits.append(min_logits)
+            all_max_logits.append(max_logits)
+            all_confidence.append(confidence)
 
         return {
             'min_logits': torch.stack(all_min_logits, dim=1),      # (B, 3, 360)
             'max_logits': torch.stack(all_max_logits, dim=1),      # (B, 3, 360)
             'confidence': torch.stack(all_confidence, dim=1)       # (B, 3, 360)
         }
-
+    
 
 # Load data
-base_dir = os.path.dirname(os.path.abspath(__file__))
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # pseudoslam/envs (data/ lives there)
 data_dir = os.path.join(base_dir, "data")
-training_lidar = np.load(os.path.join(data_dir, "diverse_training_lidar_3.npy"))
-training_labels = np.load(os.path.join(data_dir, "diverse_training_labels_3.npy"))
-testing_lidar = np.load(os.path.join(data_dir, "diverse_testing_lidar_3.npy"))
-labels_test = np.load(os.path.join(data_dir, "diverse_testing_labels_3.npy"))
+training_lidar = np.load(os.path.join(data_dir, "fix_training_lidar_1obs.npy"))
+training_labels = np.load(os.path.join(data_dir, "fix_training_labels_1obs.npy"))
+testing_lidar = np.load(os.path.join(data_dir, "fix_testing_lidar_1obs.npy"))
+labels_test = np.load(os.path.join(data_dir, "fix_testing_labels_1obs.npy"))
+validation_lidar = np.load(os.path.join(data_dir, "fix_validation_lidar_1obs.npy"))
+validation_labels = np.load(os.path.join(data_dir, "fix_validation_labels_1obs.npy"))
 
 
 # Debug: Print shapes to verify
@@ -752,18 +587,23 @@ print(f"Training lidar shape: {training_lidar.shape}")
 print(f"Training labels shape: {training_labels.shape}")
 print(f"Testing lidar shape: {testing_lidar.shape}")
 print(f"Testing labels shape: {labels_test.shape}")
+print(f"Validation lidar shape: {validation_lidar.shape}")
+print(f"Validation labels shape: {validation_labels.shape}")
 
 # Use labels as tensors
 training_targets = generate_multi_obstacle_targets(training_labels)
 training_min_indices, training_max_indices = extract_min_max_from_targets(training_targets, device)
 testing_targets = generate_multi_obstacle_targets(labels_test)
 testing_min_indices, testing_max_indices = extract_min_max_from_targets(testing_targets, device)
-
+validation_targets = generate_multi_obstacle_targets(validation_labels)
+validation_min_indices, validation_max_indices = extract_min_max_from_targets(validation_targets, device)
 
 print(f"Training min indices length: {len(training_min_indices)}")
 print(f"Training max indices length: {len(training_max_indices)}")
 print(f"Testing min indices length: {len(testing_min_indices)}")
 print(f"Testing max indices length: {len(testing_max_indices)}")
+print(f"Validation min indices length: {len(validation_min_indices)}")
+print(f"Validation max indices length: {len(validation_max_indices)}")
 
 print("Batch min/max labels:", training_labels.min().item(), training_labels.max().item())
 
@@ -804,19 +644,27 @@ def create_biased_mask(labels, keep_1_prob=1.0, keep_0_prob=0.1):
 
 training_mask = create_biased_mask(training_labels, keep_1_prob=1.0, keep_0_prob=0.1)
 testing_mask = np.ones_like(labels_test, dtype=np.float32)
+validation_mask = np.ones_like(validation_labels, dtype=np.float32)
 
 train_dataset = LidarTSDFDataset(
     training_lidar, 
     (training_min_indices, training_max_indices), 
     training_mask,
-    tsdf_cache_path=os.path.join(data_dir, "tsdf_train_3obs.npy")
+    tsdf_cache_path=os.path.join(data_dir, "tsdf_train_1obs.npy")
 )
 
 test_dataset = LidarTSDFDataset(
     testing_lidar, 
     (testing_min_indices, testing_max_indices), 
     testing_mask,
-    tsdf_cache_path=os.path.join(data_dir, "tsdf_test_3obs.npy")
+    tsdf_cache_path=os.path.join(data_dir, "tsdf_test_1obs.npy")
+)
+
+validation_dataset = LidarTSDFDataset(
+    validation_lidar,
+    (validation_min_indices, validation_max_indices),
+    validation_mask,
+    tsdf_cache_path=os.path.join(data_dir, "tsdf_val_1obs.npy")
 )
 
 # debug_dataset_labels(train_dataset, num_samples=5)
@@ -824,24 +672,24 @@ test_dataset = LidarTSDFDataset(
 
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=4)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=4)
+validation_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=4)
 
 
 # Use improved model without gating
-resnet = ImprovedResNetNoGating3_LiDAROnly().to(device)
+resnet = ImprovedResNetNoGating1().to(device)
 
 
 def train_model():
     optimizer = optim.AdamW(resnet.parameters(), lr=0.0001, weight_decay=1e-3)  
     
-    # CRITICAL: More gradual learning rate decay
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.7, patience=3
     )
     
     loss_history = []
-    loss_components = {'tsdf_loss': [], 'range_size_penalty': [], 'overlap_penalty': [], 'total_loss': []}
+    val_loss_history = []
+    loss_components = {'position_loss': [], 'confidence_loss': [], 'span_constraint_loss': []}
     
-    # Add gradient checking
     def check_gradients():
         total_norm = 0
         param_count = 0
@@ -857,27 +705,23 @@ def train_model():
     for epoch in range(num_epochs):
         resnet.train()
         epoch_loss = 0.0
-        epoch_components = {'tsdf_loss': 0.0, 'range_size_penalty': 0.0, 'overlap_penalty': 0.0, 'total_loss': 0.0}
+        epoch_components = {'position_loss': 0.0, 'confidence_loss': 0.0, 'span_constraint_loss': 0.0}
         batch_count = 0
         
         for batch_idx, (distances, labels, _, tsdf) in enumerate(train_loader):
             distances = distances.to(device)
             tsdf = tsdf.to(device)
             
-            # Generate targets
             obstacle_targets = generate_multi_obstacle_targets(labels)
             
-            # CRITICAL: Check for empty targets
             if not any(len(targets) > 0 for targets in obstacle_targets):
                 print(f"WARNING: Batch {batch_idx} has no obstacles, skipping")
                 continue
 
             optimizer.zero_grad()
             
-            # Forward pass
             predictions = resnet(distances, tsdf)
             
-            # CRITICAL: Add prediction debugging
             if batch_idx == 0 and epoch % 2 == 0:
                 min_preds = torch.argmax(predictions['min_logits'][0], dim=-1)
                 max_preds = torch.argmax(predictions['max_logits'][0], dim=-1)
@@ -888,22 +732,18 @@ def train_model():
                 print(f"  Conf: {conf_preds.mean(dim=-1).detach().cpu().numpy()}")
                 print(f"  Ground truth: {obstacle_targets[0]}")
 
-            # Loss computation with the fixed function
-            loss, components = improved_multi_obstacle_tsdf_loss(predictions, tsdf)
-            
-            # CRITICAL: Check for NaN loss
+            loss, components = single_obstacle_loss_with_constraints(predictions, obstacle_targets)
+
             if torch.isnan(loss):
                 print(f"NaN loss detected at epoch {epoch}, batch {batch_idx}")
                 continue
                 
             loss.backward()
             
-            # # Check gradients
-            # grad_norm = check_gradients()
-            # if grad_norm > 10.0:  # Gradient explosion check
-            #     print(f"Large gradient norm: {grad_norm:.4f}")
+            grad_norm = check_gradients()
+            if grad_norm > 10.0:
+                print(f"Large gradient norm: {grad_norm:.4f}")
             
-            # CRITICAL: Gradient clipping
             torch.nn.utils.clip_grad_norm_(resnet.parameters(), max_norm=1.0)
             optimizer.step()
             
@@ -915,35 +755,56 @@ def train_model():
             
             if batch_idx % 10 == 0:
                 print(f'Epoch [{epoch+1}/{num_epochs}], Step [{batch_idx+1}/{len(train_loader)}], '
-                      f'Loss: {loss.item():.4f}')
+                      f'Loss: {loss.item():.4f}, Grad norm: {grad_norm:.4f}')
         
         if batch_count == 0:
             print(f"WARNING: No valid batches in epoch {epoch}")
             continue
             
         avg_epoch_loss = epoch_loss / batch_count
-        scheduler.step(avg_epoch_loss)  # Use loss for scheduling
-        loss_history.append(avg_epoch_loss)
         
+        # Validation loop (no grad)
+        resnet.eval()
+        val_epoch_loss = 0.0
+        val_batch_count = 0
+        with torch.no_grad():
+            for val_batch_idx, (distances, labels, _, tsdf) in enumerate(validation_loader):
+                distances = distances.to(device)
+                tsdf = tsdf.to(device)
+                obstacle_targets = generate_multi_obstacle_targets(labels)
+                if not any(len(targets) > 0 for targets in obstacle_targets):
+                    continue
+                
+                predictions = resnet(distances, tsdf)
+                val_loss, _ = single_obstacle_loss_with_constraints(predictions, obstacle_targets)
+                val_epoch_loss += val_loss.item()
+                val_batch_count += 1
+        
+        avg_val_loss = val_epoch_loss / max(val_batch_count, 1)
+        
+        scheduler.step(avg_val_loss)
+        
+        loss_history.append(avg_epoch_loss)
+        val_loss_history.append(avg_val_loss)
         for key in epoch_components:
             loss_components[key].append(epoch_components[key] / batch_count)
         
-        print(f'Epoch [{epoch+1}/{num_epochs}] Average Loss: {avg_epoch_loss:.4f}')
-        print(f' TSDF Loss: {epoch_components["tsdf_loss"] / batch_count:.4f}, '
-              f' Range Size Penalty: {epoch_components["range_size_penalty"] / batch_count:.4f}, '
-              f' Overlap Penalty: {epoch_components["overlap_penalty"] / batch_count:.4f}, '
-              f' Total Loss: {epoch_components["total_loss"] / batch_count:.4f}')
+        print(f'Epoch [{epoch+1}/{num_epochs}] Average Training Loss: {avg_epoch_loss:.4f}')
+        print(f'Epoch [{epoch+1}/{num_epochs}] Average Validation Loss: {avg_val_loss:.4f}')
+        print(f'  Position Loss: {epoch_components["position_loss"]/batch_count:.4f}')
+        print(f'  Confidence Loss: {epoch_components["confidence_loss"]/batch_count:.4f}')
         
-        # Early stopping check
+        # Early stopping
         if len(loss_history) > 10:
             recent_losses = loss_history[-10:]
             if max(recent_losses) - min(recent_losses) < 0.001:
                 print("Loss plateaued, stopping early")
                 break
     
-    return loss_history, loss_components
+    return loss_history, val_loss_history, loss_components
 
-def improved_post_processing(predictions, num_expected_obstacles=3):
+
+def improved_post_processing(predictions, num_expected_obstacles=1):
     """
     Post-processing that ignores confidence and relies only on min/max logits.
     """
@@ -1022,41 +883,11 @@ def improved_post_processing(predictions, num_expected_obstacles=3):
 
     return batch_results
 
-def test_single_scan(distances, tsdf, num_expected_obstacles=3):
-    """
-    Run a single unlabeled LiDAR scan through the model and return predicted obstacle spans.
-    """
-    resnet.eval()
 
-    if isinstance(distances, np.ndarray):
-        distances = torch.tensor(distances, dtype=torch.float32)
-    if distances.ndim == 1: 
-        distances = distances.unsqueeze(0)  # (1, 360)
-    if distances.ndim == 2:
-        distances = distances.unsqueeze(1)  # (1, 1, 360)
-
-    distances = distances.to(device)
-
-    if tsdf is not None:
-        if isinstance(tsdf, np.ndarray):
-            tsdf = torch.tensor(tsdf, dtype=torch.float32)
-        if tsdf.ndim == 3:
-            tsdf = tsdf.unsqueeze(0)  # (1, C, H, W)
-        tsdf = tsdf.to(device)
-    else:
-        # Dummy TSDF if not provided — adjust shape if needed
-        tsdf = torch.zeros((1, 1, 30, 30), device=device)
-
-    with torch.no_grad():
-        predictions = resnet(distances, tsdf)
-        spans = improved_post_processing(predictions, num_expected_obstacles=num_expected_obstacles)
-
-    return spans[0]
-
-
-def test_model_with_improved_processing(loss_history, loss_components):
+def test_model_with_improved_processing(loss_history, loss_components, val_loss_history=None):
     """
     Updated test function using the improved post-processing
+    Optionally plots validation loss if provided.
     """
     resnet.eval()
     total_samples = 0
@@ -1076,7 +907,7 @@ def test_model_with_improved_processing(loss_history, loss_components):
         predictions = resnet(distances, tsdf)
         
         # Use improved post-processing
-        batch_predicted_spans = improved_post_processing(predictions, num_expected_obstacles=3)
+        batch_predicted_spans = improved_post_processing(predictions, num_expected_obstacles=1)
 
         batch_size = distances.size(0)
         total_samples += batch_size
@@ -1117,13 +948,19 @@ def test_model_with_improved_processing(loss_history, loss_components):
     print(f'Obstacle Detection Accuracy: {obstacle_accuracy:.2f}%')
     print(f'Average Width Error: {avg_error:.2f} degrees')
 
-    plt.figure(figsize=(15, 10))
+    plt.figure(figsize=(18, 10))
 
-    plt.subplot(2, 3, 1)
-    plt.plot(range(num_epochs), loss_history, label='Total Loss')
-    plt.xlabel('Epochs'); plt.ylabel('Loss'); plt.title('Training Loss'); plt.legend()
+    plt.subplot(2, 4, 1)
+    plt.plot(range(num_epochs), loss_history, label='Training Loss')
+    # if val_loss_history is not None:
+    #     plt.plot(range(num_epochs), val_loss_history, label='Validation Loss')
+    # Title the graph
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.title('1 Obstacle Training Loss')
+    plt.legend()
 
-    plt.subplot(2, 3, 2)
+    plt.subplot(2, 4, 2)
     for key, values in loss_components.items():
         # Skip if empty
         if values is None or len(values) == 0:
@@ -1147,19 +984,23 @@ def test_model_with_improved_processing(loss_history, loss_components):
     plt.title('Loss Components')
     plt.legend()
 
-
-    plt.subplot(2, 3, 3)
+    plt.subplot(2, 4, 3)
     plt.title('No Gating Statistics')
     plt.text(0.5, 0.5, 'Gating removed', ha='center', va='center', fontsize=14)
     plt.axis('off')
 
     plt.tight_layout()
     plt.show()
+    plt.savefig("1_obs_training_loss.png")
+    print(f"Saved plot to 1_obs_training_loss.png")
+
 
     return obstacle_accuracy, avg_error
 
 
-def test_model_with_improved_processing_single(dataloader, num_expected_obstacles=3, verbose=False):
+
+
+def test_model_with_improved_processing_single(dataloader, num_expected_obstacles=1, verbose=False):
     """
     Runs the model on the provided dataloader and returns predicted obstacle spans.
 
@@ -1171,8 +1012,8 @@ def test_model_with_improved_processing_single(dataloader, num_expected_obstacle
     Returns:
         all_predictions (List[List[Tuple[int, int]]]): List of predicted spans for each sample
     """
-    test_resnet = ImprovedResNetNoGating3_LiDAROnly().to(device)
-    model_path = os.path.join(data_dir, "diverse_resnet_tsdf.pth")
+    test_resnet = ImprovedResNetNoGating1().to(device)
+    model_path = os.path.join(data_dir, "resnet_1obstest.pth")
     test_resnet.load_state_dict(torch.load(model_path))
     test_resnet.eval()
     all_predictions = []
@@ -1196,44 +1037,6 @@ def test_model_with_improved_processing_single(dataloader, num_expected_obstacle
 
     return all_predictions
 
-def test_model_with_improved_processing_multi(dataloader, num_expected_obstacles=3, verbose=False, model_path=None):
-    """
-    Runs the model on the provided dataloader and returns predicted obstacle spans for all samples.
-
-    Args:
-        dataloader (DataLoader): PyTorch DataLoader containing (distances, labels, _, tsdf)
-        num_expected_obstacles (int): Number of predicted obstacle spans per sample
-        verbose (bool): Whether to print debug output for first few batches
-        model_path (str, optional): Path to the model weights. If None, uses default.
-
-    Returns:
-        all_predictions (List[List[Tuple[int, int]]]): List of predicted spans for each sample in the dataloader
-    """
-    test_resnet = ImprovedResNetNoGating3().to(device)
-    if model_path is None:
-        model_path = os.path.join(data_dir, "diverse_resnet_tsdf.pth")
-    test_resnet.load_state_dict(torch.load(model_path, map_location=device))
-    test_resnet.eval()
-    all_predictions = []
-    num_batches = 0
-
-    for batch_idx, (distances, labels, _, tsdf) in enumerate(dataloader, start=1):
-        distances = distances.to(device)
-        tsdf = tsdf.to(device)
-
-        with torch.no_grad():
-            predictions = test_resnet(distances, tsdf)
-
-        batch_predicted_spans = improved_post_processing(predictions, num_expected_obstacles=num_expected_obstacles)
-        all_predictions.extend(batch_predicted_spans)
-
-        if verbose and num_batches < 3:
-            for b, pred_spans in enumerate(batch_predicted_spans):
-                print(f"Batch {num_batches}, Sample {b+1}: Predicted Spans: {pred_spans}")
-
-        num_batches += 1
-
-    return all_predictions
 
 def inspect_dataset_constructor():
     """
@@ -1252,8 +1055,8 @@ inspect_dataset_constructor()
 
 if __name__ == "__main__":
     # train_model_few_batches()
-    loss_history, loss_components = train_model()
-    obstacle_accuracy, avg_error = test_model_with_improved_processing(loss_history, loss_components)
+    loss_history, val_loss_history, loss_components = train_model()
+    obstacle_accuracy, avg_error = test_model_with_improved_processing(loss_history, loss_components, val_loss_history)
     # sample_lidar = testing_lidar[200]  # Use the first sample for testing
     # sample_tsdf = lidar_to_tsdf_obstacles(np.expand_dims(sample_lidar, axis=0))  # Get corresponding TSDF
     # Generate dummy labels (all 0s)
@@ -1275,7 +1078,7 @@ if __name__ == "__main__":
     # print("Actual obstacle spans:")
     # print(actual_obstacle_spans)
 
-    model_path = os.path.join(data_dir, "diverse_resnet_tsdf.pth")
+    model_path = os.path.join(data_dir, "resnet_1obstest.pth")
     torch.save(resnet.state_dict(), model_path)
     print(f'Model saved to {model_path}')
 

@@ -230,7 +230,7 @@ def improved_min_max_loss(min_pred_logits, max_pred_logits, min_target, max_targ
     return alpha * position_loss + (1-alpha) * ce_loss + 0.1 * span_loss
 
 # Load data
-base_dir = os.path.dirname(os.path.abspath(__file__))
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # pseudoslam/envs (data/ lives there)
 data_dir = os.path.join(base_dir, "data")
 training_lidar = np.load(os.path.join(data_dir, "training_lidar.npy"))
 training_labels = np.load(os.path.join(data_dir, "training_labels.npy"))

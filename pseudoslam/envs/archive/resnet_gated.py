@@ -632,7 +632,7 @@ def gated_min_max_loss(min_pred_logits, max_pred_logits, min_target, max_target,
     }
 
 # Load data
-base_dir = os.path.dirname(os.path.abspath(__file__))
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # pseudoslam/envs (data/ lives there)
 data_dir = os.path.join(base_dir, "data")
 training_lidar = np.load(os.path.join(data_dir, "new_training_lidar.npy"))
 training_labels = np.load(os.path.join(data_dir, "new_training_labels.npy"))

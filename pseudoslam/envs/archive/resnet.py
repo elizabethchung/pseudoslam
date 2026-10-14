@@ -37,7 +37,7 @@ class LidarDataset(Dataset):
     
 # Load the datasets
 # Set path to be data directory
-base_dir = os.path.dirname(os.path.abspath(__file__))
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # pseudoslam/envs (data/ lives there)
 data_dir = os.path.join(base_dir, "data")
 # Load training and testing data (LIDAR and labels)
 training_lidar = np.load(os.path.join(data_dir, "training_lidar.npy")) 

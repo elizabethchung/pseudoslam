@@ -154,7 +154,7 @@ def min_max_loss(min_pred, max_pred, min_target, max_target):
     max_loss = sigmoid_focal_loss(max_pred, F.one_hot(max_target, num_classes=360).float(), reduction="mean")
     return min_loss + max_loss
 
-base_dir = os.path.dirname(os.path.abspath(__file__))
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # pseudoslam/envs (data/ lives there)
 data_dir = os.path.join(base_dir, "data")
 training_lidar = np.load(os.path.join(data_dir, "training_lidar.npy"))
 training_labels = np.load(os.path.join(data_dir, "training_labels.npy"))
